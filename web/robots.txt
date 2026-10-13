@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /api/
+Disallow: /receipt
+Disallow: /admin
+Allow: /

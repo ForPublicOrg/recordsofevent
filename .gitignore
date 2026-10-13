@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.data/
+.env
+.env.*
+!.env.example
+.vercel/
+*.log
+.DS_Store
+Thumbs.db
+
+# Planning material kept locally, not part of the open-source app
+prototype/
+docs/plan/

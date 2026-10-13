@@ -1,0 +1,25 @@
+{
+  "name": "recordsofevent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Open-source public archive of raw footage from events.",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@fontsource-variable/bricolage-grotesque": "^5.1.1",
+    "@fontsource-variable/instrument-sans": "^5.1.1",
+    "@fontsource-variable/jetbrains-mono": "^5.1.2",
+    "esbuild": "^0.24.2",
+    "hash-wasm": "^4.12.0",
+    "qrcode-generator": "^1.4.4"
+  }
+}
