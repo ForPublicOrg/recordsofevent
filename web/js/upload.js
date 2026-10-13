@@ -1,6 +1,8 @@
 // Upload wizard: pick event → add videos → safety & consent → upload → receipt.
 // Files go straight from the browser to storage in 8 MiB parts (resumable, retried on network loss).
 // Location and phone details are blanked out on the device first (see mp4.js).
+// Videos added by link are checked and copied by the server (server/links.js); the browser only
+// drives the copy, part by part, so it resumes after a dropped connection.
 import { $, $$, ic, esc, dur, bytes, plural, fmtDate, api, toast, copy, qr, origin, store, config } from './util.js';
 import { inspect, patched, fingerprint } from './mp4.js';
 import { openOverlay, invalidate, peekEvent, peekHome, loadEventData } from './main.js';
@@ -78,7 +80,7 @@ function draw() {
   if (keep) $('.mbody', m).scrollTop = keep;
   if (U.step === 0) bindPicker();
   if (U.step === 1) bindFiles();
-  if (U.step === 4 && U.token) qr($('#receiptqr'), receiptLink());
+  if (U.step === 4 && $('#receiptqr')) qr($('#receiptqr'), receiptLink());
 }
 function patchFoot() { const f = $('#upmodal .mfoot'); if (f && U) f.innerHTML = STEPS[U.step]()[1]; }
 const coverOf = (e) => e.coverUrl || `/m/p/${e.cover}`;
@@ -105,17 +107,20 @@ function step1() {
   const places = evPlaces();
   return [`${evHead()}
     <label class="drop" id="drop"><input type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.3gp,.avi" multiple class="vh" id="fileinput"><span class="big">${ic('upload', 32, 2.2)}</span><b>Drop videos here</b><p>or tap to choose from your phone</p><p style="font-size:13px">${ic('lock', 13)} Nothing is sent until you tap Upload.</p></label>
+    ${config.links === false ? '' : `<form class="linkadd" id="linkadd" novalidate><span class="lk">${ic('link', 18)}</span><input id="linkin" type="url" inputmode="url" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Or paste a video link" aria-label="Video link"><button class="btn btn-ghost btn-sm" type="submit">Add</button></form>
+    <p class="linkhint" id="linkhint">The link must be public (in Drive: “Anyone with the link”). We copy the video when you tap Upload. The link isn’t kept.</p>`}
     <div class="files" id="filelist">${U.files.map(fileRow).join('')}</div>
     ${U.files.length ? `<div class="field" style="margin-top:18px"><label>Where were you filming? <span style="color:var(--dim)">(optional)</span></label>
       <div class="cats" id="placechips">${placeChips()}</div>
       <input id="placeother" maxlength="80" placeholder="Another place — street, square, landmark" value="${esc(places.some((p) => p.name === U.place) ? '' : U.place)}" style="margin-top:8px"></div>` : ''}`,
   `<span class="hint">${U.files.length ? `${plural(U.files.length, 'video')} · ${bytes(total)}` : ''}</span><div style="display:flex;gap:8px"><button class="btn btn-ghost" data-up="back">Back</button><button class="btn btn-primary" data-up="next" ${U.ev && U.files.length && !U.files.some((f) => f.preparing) ? '' : 'disabled'}>Continue ${ic('arrow', 16)}</button></div>`];
 }
-const thumbHtml = (f) => (f.thumb ? `<img src="${f.thumb}" alt="">` : ic('film', 26));
+const thumbHtml = (f) => (f.thumb ? `<img src="${f.thumb}" alt="">` : ic(f.link ? 'link' : 'film', 26));
 function subHtml(f, live) {
+  if (f.link && f.preparing) return `<span class="checking">${ic('link', 13)} Checking the link…</span>`;
   const found = f.found && f.found.length ? `<span class="found">${ic('pin', 13)} ${esc(f.found.join(', '))} found · will be removed</span>` : '';
   const warn = f.warning ? `<span class="warnline">${ic('alert', 13)} ${esc(f.warning)}</span>` : '';
-  return `<span>${bytes(f.size)}</span>${f.duration ? `<span>${dur(f.duration)}</span>` : ''}
+  return `${f.link ? `<span>${ic('link', 13)} ${esc(f.host)}</span>` : ''}<span>${bytes(f.size)}</span>${f.duration ? `<span>${dur(f.duration)}</span>` : ''}
     ${!live ? `<button class="timechip" data-edittime="${f.id}" title="When this was filmed — tap to correct">${ic('clock', 13)} ${f.preparing ? 'Reading…' : esc(fmtLocal(f.captured))}${f.ts === 'file' ? ' ≈' : ''}</button>` : `<span>${ic('clock', 13)} ${esc(fmtLocal(f.captured))}</span>`}
     ${!live ? found + warn : ''}${f.shao && live ? `<span class="mono" title="${f.shao}">#${f.shao.slice(0, 10)}…</span>` : ''}`;
 }
@@ -136,6 +141,14 @@ function fileRow(f) {
 function ladder(f) {
   if (f.phase === 'error') return `<div class="ladder"><span class="bad">${ic('alert', 12, 3)}${esc(f.error)}</span>${U.running ? '' : `<button class="link" data-retry="${f.id}">Try again</button>`}</div>`;
   if (f.phase === 'dupe') return `<div class="ladder"><span class="ok">${ic('check', 12, 3)}This exact file is already on record as <b class="mono">${esc(f.record)}</b></span></div>`;
+  const done = f.phase === 'done', tick = done ? ic('check', 12, 3) : '';
+  if (f.link) {
+    return `<div class="ladder">
+    <span class="${done ? 'ok' : f.phase === 'up' ? 'now' : ''}">${tick}${f.phase === 'up' ? `Copying ${Math.floor(f.pct)}%` : done ? 'Copied' : 'Copy from link'}</span>
+    <span class="${done ? 'ok' : ''}">${tick}Fingerprinted</span>
+    <span class="${done ? 'ok' : ''}">${tick}Received</span>
+    <span class="${done ? 'now' : ''}">${f.status === 'published' ? 'Public' : 'In review'}</span></div>`;
+  }
   const hashed = f.shao || f.phase === 'up' || f.phase === 'done';
   return `<div class="ladder">
     <span class="${hashed ? 'ok' : f.phase === 'hash' ? 'now' : ''}">${hashed ? ic('check', 12, 3) : ''}Fingerprinted${f.phase === 'hash' ? ` ${Math.round(f.hashPct * 100)}%` : ''}</span>
@@ -147,22 +160,25 @@ function step2() {
   const total = U.files.reduce((s, f) => s + f.size, 0);
   const found = [...new Set(U.files.flatMap((f) => f.found || []))];
   const unchecked = U.files.filter((f) => f.warning);
-  const mins = Math.max(1, Math.round(total / 1048576 / 60));
+  const links = U.files.filter((f) => f.link).length;
+  const local = U.files.reduce((s, f) => s + (f.link ? 0 : f.size), 0);
+  const mins = Math.max(1, Math.round(local / 1048576 / 60));
+  const where = links ? 'before anything is saved' : 'on this device before anything is sent';
   return [`<div class="vstack">
-      <div class="toggle on locked"><span class="ic" style="background:#ff7a1a22;color:#ff7a1a">${ic('pin', 24)}</span><span class="tx"><b>Location & phone details removed</b><span>${found.length ? `Found in your videos: ${esc(found.join(', '))}. Removed on this device before anything is sent.` : 'No hidden location or phone details found. Checked on this device.'}</span></span><span class="sw" aria-hidden="true"></span></div>
+      <div class="toggle on locked"><span class="ic" style="background:#ff7a1a22;color:#ff7a1a">${ic('pin', 24)}</span><span class="tx"><b>Location & phone details removed</b><span>${found.length ? `Found in your videos: ${esc(found.join(', '))}. Removed ${where}.` : `No hidden location or phone details found.${links ? '' : ' Checked on this device.'}`}</span></span><span class="sw" aria-hidden="true"></span></div>
       ${unchecked.length ? `<div class="netnote warn">${ic('alert', 18)}<span>${plural(unchecked.length, 'file')} couldn’t be checked: ${esc(unchecked.map((f) => f.name).join(', '))}. ${esc(unchecked[0].warning)}</span></div>` : ''}
       <div class="toggle on locked"><span class="ic" style="background:#7c5cff22;color:#7c5cff">${ic('user', 24)}</span><span class="tx"><b>Anonymous</b><span>No name, no account, no phone number. Your IP address isn’t stored.</span></span><span class="sw" aria-hidden="true"></span></div>
       <button class="toggle ${U.sensitive ? 'on' : ''}" data-up="sensitive" role="switch" aria-checked="${U.sensitive}" style="text-align:left"><span class="ic" style="background:#12b88622;color:#12b886">${ic('eyeoff', 24)}</span><span class="tx"><b>Shows injury or violence</b><span>Viewers see a warning and tap to watch.</span></span><span class="sw"></span></button>
     </div>
     <button class="consent ${U.consent ? 'on' : ''}" data-up="consent" style="width:100%;text-align:left" role="checkbox" aria-checked="${U.consent}"><span class="box">${U.consent ? ic('check', 16, 3) : ''}</span><span>I filmed these, or the person who did agreed. They will be public and kept permanently, and others may reuse them with credit (<a href="/policy" target="_blank">CC BY 4.0</a>).</span></button>
-    <div class="summary"><div><b>${U.files.length}</b><span>${U.files.length === 1 ? 'video' : 'videos'}</span></div><div><b>${bytes(total)}</b><span>data</span></div><div><b>~${mins} min</b><span>on mobile data</span></div></div>
+    <div class="summary"><div><b>${U.files.length}</b><span>${U.files.length === 1 ? 'video' : 'videos'}</span></div><div><b>${bytes(total)}</b><span>data</span></div><div>${local ? `<b>~${mins} min</b><span>on mobile data</span>` : `<b>${links}</b><span>${links === 1 ? 'link' : 'links'}, copied by us</span>`}</div></div>
     ${config.storage === false ? `<div class="netnote warn">${ic('alert', 18)}<span>Uploads aren’t switched on for this site yet.</span></div>` : ''}`,
   `<span class="hint">${U.consent ? '' : 'Tick the box to upload'}</span><div style="display:flex;gap:8px"><button class="btn btn-ghost" data-up="back">Back</button><button class="btn btn-accent btn-lg" data-up="go" ${U.consent && config.storage !== false ? '' : 'disabled'}>${ic('upload', 18)}Upload ${U.files.length} · ${bytes(total)}</button></div>`];
 }
 function step3() {
   return [`<div id="netnote">${U.net ? `<div class="netnote">${ic('wifi', 18)}Connection lost — it will continue by itself.</div>` : ''}</div>
     ${U.token ? receiptCard() : ''}
-    <div class="files live" id="filelist">${U.files.map(fileRow).join('')}</div>`,
+    <div class="files uplive" id="filelist">${U.files.map(fileRow).join('')}</div>`,
   `<span class="hint">${ic('phone', 14)} Keep this screen open — or use Pocket mode.</span><div style="display:flex;gap:8px"><button class="btn btn-ghost" data-up="pause">${U.paused ? ic('play', 15) + 'Resume' : ic('pause', 15) + 'Pause'}</button><button class="btn btn-primary" data-up="pocket">${ic('phone', 16)}Pocket mode</button></div>`];
 }
 const receiptCard = () => `<div class="card" id="upreceipt" style="display:flex;gap:14px;align-items:center;margin-bottom:14px;padding:16px">${ic('receipt', 22)}<div style="flex:1;min-width:0"><b>Your private receipt</b><p style="margin:2px 0 0">Save it now, while the upload runs. It’s the only way to remove your videos later.</p></div><button class="btn btn-ghost btn-sm" data-up="copyreceipt">${ic('copy', 15)}Copy link</button></div>`;
@@ -173,9 +189,9 @@ function step4() {
   return [`<div class="done"><div class="check"><svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></div>
       <h3>${ok.length ? `${plural(ok.length, 'video')} · safe on record` : 'Nothing new uploaded'}</h3>
       <p>${pending ? 'A moderator checks every video before it goes public — usually within a few hours.' : ok.length ? 'Your videos are public now.' : ''}${failed.length ? ` ${plural(failed.length, 'file')} didn’t upload — try again below.` : ''}</p>
-      ${failed.length ? `<div class="files live" style="width:100%">${failed.map(fileRow).join('')}</div>` : ''}
-      ${U.token ? `<div class="receipt"><div class="recs">${U.files.filter((f) => f.record).map((f) => `<div><span>${esc(f.name.length > 28 ? f.name.slice(0, 26) + '…' : f.name)}</span><b>${f.record}</b></div>`).join('')}
-        <div style="background:transparent;padding:6px 0 0;flex-direction:column;align-items:stretch"><b style="font-family:var(--font-ui)">Your private receipt</b><span style="color:var(--muted);font-size:13px">Save this link. It’s the only way to remove your videos later. It’s also saved on this device under “My uploads”.</span><div class="privlink"><input readonly value="${esc(receiptLink())}" aria-label="Receipt link"><button class="btn btn-primary btn-sm" data-up="copyreceipt" aria-label="Copy receipt link">${ic('copy', 15)}</button></div></div></div>
+      ${failed.length ? `<div class="files uplive" style="width:100%">${failed.map(fileRow).join('')}</div>` : ''}
+      ${U.token && ok.length ? `<div class="receipt"><div class="rcol"><div class="recs">${U.files.filter((f) => f.record).map((f) => `<div><span>${esc(f.name.length > 28 ? f.name.slice(0, 26) + '…' : f.name)}</span><b>${f.record}</b></div>`).join('')}</div>
+        <div class="rlink"><b>Your private receipt</b><span>Save this link. It’s the only way to remove your videos later. It’s also saved on this device under “My uploads”.</span><div class="privlink"><input readonly value="${esc(receiptLink())}" aria-label="Receipt link"><button class="btn btn-primary btn-sm" data-up="copyreceipt" aria-label="Copy receipt link">${ic('copy', 15)}</button></div></div></div>
         <div class="qrbox" id="receiptqr"></div></div>` : ''}
     </div>`,
   `<button class="btn btn-ghost" data-up="more">${ic('plus', 16)}Upload more</button><a class="btn btn-primary" href="/e/${U.ev.slug}">View event ${ic('arrow', 16)}</a>`];
@@ -191,6 +207,7 @@ const rowEl = (f) => $(`#upmodal .file[data-file="${f.id}"]`);
 function patchRow(f, force) {
   const row = rowEl(f); if (!row) return;
   $('.th', row).innerHTML = thumbHtml(f);
+  const name = $('b', row); if (name && name.textContent !== f.name) name.textContent = f.name;
   const sub = $('.sub', row);
   if (force || !sub.contains(document.activeElement)) sub.innerHTML = subHtml(f, U.step >= 3);
 }
@@ -223,6 +240,11 @@ function bindFiles() {
   ['dragleave', 'drop'].forEach((e) => d.addEventListener(e, (x) => { x.preventDefault(); d.classList.remove('over'); }));
   d.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
   inp.addEventListener('change', () => { addFiles(inp.files); inp.value = ''; });
+  const form = $('#linkadd'), lin = $('#linkin');
+  if (form) {
+    form.addEventListener('submit', (e) => { e.preventDefault(); if (addLinks(lin.value)) lin.value = ''; });
+    lin.addEventListener('paste', () => setTimeout(() => { if (/^\s*https?:\/\/\S+/i.test(lin.value) && addLinks(lin.value)) lin.value = ''; }, 0));
+  }
   const other = $('#placeother');
   if (other) other.addEventListener('input', () => { U.place = other.value.trim(); $$('#placechips button').forEach((b) => b.classList.toggle('on', b.dataset.placename === U.place)); });
 }
@@ -240,6 +262,53 @@ function addFiles(list) {
   const el = $('#filelist');
   if (had && el) { el.insertAdjacentHTML('beforeend', added.map(fileRow).join('')); patchFoot(); } else draw();
   added.forEach(queuePrepare);
+}
+
+// Links are checked by the server right away; the row shows "Checking the link…" until then.
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'link'; } };
+function linkNote(msg) {
+  const h = $('#linkhint'); if (!h) { if (msg) toast(msg, 'alert'); return; }
+  if (!h.dataset.text) h.dataset.text = h.textContent;
+  h.classList.toggle('bad', !!msg);
+  h.textContent = msg || h.dataset.text;
+}
+function addLinks(text) {
+  const urls = [...new Set(String(text || '').match(/https?:\/\/[^\s<>"']+/gi) || [])];
+  if (!urls.length) { linkNote(String(text || '').trim() ? 'Paste the full link, starting with https://' : 'Paste a link to a video first.'); return false; }
+  linkNote('');
+  const had = U.files.length, added = [];
+  for (const link of urls) {
+    if (U.files.some((f) => f.link === link)) continue;
+    if (U.files.length >= 50) { toast('Up to 50 videos at a time', 'alert'); break; }
+    const f = { id: ++fileSeq, u: U, link, host: hostOf(link), file: null, name: link.replace(/^https?:\/\/(www\.)?/i, ''), size: 0, mime: '', captured: guessTime(), ts: 'file', note: '', found: [], patches: [], warning: null, thumb: null, poster: null, duration: null, width: null, height: null, preparing: true, phase: 'ready', pct: 0, hashPct: 0 };
+    U.files.push(f); added.push(f);
+  }
+  if (!added.length) return true;
+  const el = $('#filelist');
+  if (had && el) { el.insertAdjacentHTML('beforeend', added.map(fileRow).join('')); patchFoot(); } else { draw(); }
+  added.forEach(checkLink);
+  return true;
+}
+// Without a recorded filming time, midday on the event's date (marked ≈, tap to correct).
+const guessTime = () => (U && U.ev && /^\d{4}-\d\d-\d\d$/.test(U.ev.date) ? new Date(U.ev.date + 'T12:00:00') : new Date());
+async function checkLink(f) {
+  let r = null, err = null;
+  try { r = await api('/api/links/probe', { body: { url: f.link }, timeout: 60000 }); } catch (e) { err = e.message; }
+  if (f.u !== U || !U.files.includes(f)) return; // removed meanwhile, or the wizard closed
+  if (!r) {
+    removeFile(f);
+    const lin = $('#linkin'); if (lin && !lin.value) lin.value = f.link; // back in the box, ready to fix
+    linkNote(err || 'That link couldn’t be checked.');
+    return;
+  }
+  const same = U.files.find((x) => x !== f && x.name === r.name && x.size === r.size);
+  if (same) { removeFile(f); toast(`${r.name} is already added`, 'alert'); return; }
+  Object.assign(f, { ticket: r.ticket, name: r.name, size: r.size, mime: r.mime, host: r.host, thumb: r.thumb || null, found: r.found || [], warning: r.warning || null, duration: r.duration, width: r.width, height: r.height, preparing: false });
+  if (f.ts !== 'manual') {
+    const t = r.captured ? new Date(r.captured) : null;
+    if (t && !isNaN(t)) { f.captured = t; f.ts = 'metadata'; } else f.captured = guessTime();
+  }
+  if (U.step === 1) { patchRow(f, true); patchFoot(); }
 }
 
 // Thumbnails and metadata, a couple of files at a time.
@@ -269,11 +338,13 @@ async function prepare(f) {
   if (f.u === U && U.step === 1) { patchRow(f); patchFoot(); }
 }
 // Thumbnail for the list and a poster image for the archive, from a frame about 1 s in.
-function grab(file) {
+const grab = (file) => grabFrom(URL.createObjectURL(file), true);
+function grabFrom(url, own) {
   return new Promise((resolve, reject) => {
-    const v = document.createElement('video'); const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    if (!own) v.crossOrigin = 'anonymous'; // the stored copy: needs CORS to read the frame back
     v.muted = true; v.preload = 'metadata'; v.playsInline = true; v.src = url;
-    const done = (fn, x) => { clearTimeout(timer); URL.revokeObjectURL(url); v.removeAttribute('src'); v.load(); fn(x); }; // load() frees the decoder
+    const done = (fn, x) => { clearTimeout(timer); if (own) URL.revokeObjectURL(url); v.removeAttribute('src'); v.load(); fn(x); }; // load() frees the decoder
     const timer = setTimeout(() => done(reject, new Error('timeout')), 12000);
     v.addEventListener('loadedmetadata', () => { v.currentTime = Math.min(1, (v.duration || 2) / 4); });
     v.addEventListener('seeked', () => {
@@ -336,6 +407,7 @@ async function run() {
   U.step = 4; draw();
 }
 async function uploadOne(f) {
+  if (f.link) return copyOne(f);
   f.phase = 'hash'; f.error = null; refreshFiles();
   if (!f.shao) {
     const h = await fingerprint(f.file, f.patches, (p) => { f.hashPct = p; refreshFiles(); });
@@ -391,11 +463,59 @@ async function uploadOne(f) {
   }
   f.record = done.record; f.status = done.status; f.phase = 'done'; f.pct = 100;
 }
+// A linked video: the server copies it in parts while this loop asks for the next ones.
+async function copyOne(f) {
+  f.phase = 'up'; f.pct = 0; f.error = null; refreshFiles();
+  await waitUntilReady();
+  const start = await api('/api/uploads/start', { body: {
+    event: U.ev.slug, token: U.token, place: U.place, sensitive: U.sensitive,
+    file: { ticket: f.ticket, captured: f.captured.toISOString(), ts: f.ts, duration: f.duration, width: f.width, height: f.height, note: f.note },
+  } });
+  if (start.duplicate) { f.phase = 'dupe'; f.record = start.duplicate; f.pct = 100; return; }
+  if (start.token) {
+    U.token = start.token; saveReceipt();
+    const n = $('#netnote'); if (U.step === 3 && n && !$('#upreceipt')) n.insertAdjacentHTML('afterend', receiptCard());
+  }
+  f.clip = start.clip;
+  for (let fails = 0; ;) {
+    await waitUntilReady();
+    try {
+      const r = await api('/api/uploads/pull', { body: { token: U.token, clip: f.clip }, timeout: 75000 });
+      fails = 0; setNet(false);
+      f.pct = Math.max(f.pct, Math.min(99.5, (r.done / r.of) * 100)); refreshFiles();
+      if (r.done >= r.of) break;
+    } catch (e) {
+      if (e.status && e.status < 500 && e.status !== 408 && e.status !== 429) throw e; // the link itself failed
+      if (++fails > 8) throw new Error(e.status ? e.message : 'The copy stopped. Check your connection and try again.');
+      if (!e.status) setNet(true);
+      await sleep(Math.min(30000, 1500 * 2 ** Math.min(fails, 4)));
+    }
+  }
+  let done;
+  for (let attempt = 0; ; attempt++) {
+    try { done = await api('/api/uploads/complete', { body: { token: U.token, clip: f.clip }, timeout: 60000 }); break; }
+    catch (e) { if ((e.status && e.status < 500) || attempt > 5) throw e; setNet(!e.status); await sleep(2000 * (attempt + 1)); await waitUntilReady(); }
+  }
+  if (done.duplicate) { f.phase = 'dupe'; f.record = done.duplicate; f.pct = 100; return; }
+  f.record = done.record; f.status = done.status; f.shao = done.sha256; f.phase = 'done'; f.pct = 100;
+  if (!done.poster && done.vu) posterFromCopy(f, U.token, start.posterUrl, done.vu);
+}
+// Best effort, in the background: a frame of the stored copy becomes its preview image.
+async function posterFromCopy(f, token, putUrl, src) {
+  try {
+    const shot = await grabFrom(src, false);
+    if (!shot || !shot.poster) return;
+    const r = await fetch(putUrl, { method: 'PUT', body: shot.poster });
+    if (!r.ok) return;
+    await api('/api/uploads/poster', { body: { token, clip: f.clip, duration: shot.duration, width: shot.width, height: shot.height } });
+  } catch { /* the video still plays without a preview */ }
+}
 function saveReceipt() {
   if (!U || !U.token) return;
   const list = store.get('roe.receipts', []);
   const count = U.files.filter((f) => f.phase === 'done').length;
   const i = list.findIndex((x) => x.token === U.token);
+  if (!count && !U.running) { if (i >= 0) { list.splice(i, 1); store.set('roe.receipts', list); } return; }
   const item = { token: U.token, slug: U.ev.slug, title: U.ev.title, color: U.ev.color, at: i >= 0 ? list[i].at : new Date().toISOString(), count };
   if (i >= 0) list[i] = item; else list.unshift(item);
   store.set('roe.receipts', list.slice(0, 50));

@@ -1,5 +1,5 @@
 // Idempotent schema. Bump SCHEMA_VERSION after changing it; it runs once on the next cold start.
-export const SCHEMA_VERSION = '2';
+export const SCHEMA_VERSION = '3';
 
 export const SCHEMA = `
 create table if not exists meta (k text primary key, v text not null);
@@ -108,4 +108,7 @@ create table if not exists modlog (
   target text not null,
   detail jsonb
 );
+
+-- Copy progress for a video added by link (source, next part, part ETags, saved hash states).
+alter table clips add column if not exists link_job jsonb;
 `;

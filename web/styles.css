@@ -423,6 +423,14 @@ img { display: block; max-width: 100%; }
 .drop .big { width: 72px; height: 72px; border-radius: 22px; display: grid; place-items: center; background: var(--accent); color: #fff; box-shadow: 0 16px 40px -12px var(--accent); }
 .drop b { font: 650 20px var(--font-display); }
 .drop p { margin: 0; color: var(--muted); }
+.linkadd { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 6px 6px 6px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); transition: border-color .12s; }
+.linkadd:focus-within { border-color: var(--accent); }
+.linkadd .lk { color: var(--dim); display: grid; flex: none; }
+.linkadd input { flex: 1; min-width: 0; height: 38px; border: 0; background: transparent; color: inherit; font-size: 15px; outline: none; }
+.linkadd .btn { flex: none; }
+.linkhint { margin: 8px 2px 0; color: var(--dim); font-size: 13px; }
+.linkhint.bad { color: #ff8f87; font-weight: 600; }
+.file .sub .checking { color: var(--accent); }
 .files { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
 .file { display: grid; grid-template-columns: 88px 1fr auto; gap: 14px; align-items: center; padding: 10px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); animation: slidein .4s var(--ease); }
 .file .th { width: 88px; height: 64px; border-radius: 12px; object-fit: cover; background: var(--surface-3); display: grid; place-items: center; color: var(--dim); overflow: hidden; }
@@ -458,7 +466,7 @@ img { display: block; max-width: 100%; }
 .summary span { color: var(--muted); font-size: 12.5px; }
 .netnote { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 14px; background: rgba(251, 191, 36, .12); color: var(--warn-ink); font-weight: 600; font-size: 14px; margin-bottom: 12px; animation: slidein .3s; }
 
-.done { text-align: center; display: grid; justify-items: center; gap: 10px; padding: 10px 0 4px; }
+div.done { text-align: center; display: grid; justify-items: center; gap: 10px; padding: 10px 0 4px; }
 .check { width: 92px; height: 92px; border-radius: 50%; background: var(--ok); display: grid; place-items: center; color: #052e1c; animation: pop .6s var(--ease); box-shadow: 0 0 0 0 rgba(52, 211, 153, .5); }
 .check svg path { stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw .5s .3s forwards; }
 @keyframes pop { 0% { transform: scale(.3); opacity: 0; } 60% { transform: scale(1.08); box-shadow: 0 0 0 22px rgba(52, 211, 153, 0); } }
@@ -466,8 +474,11 @@ img { display: block; max-width: 100%; }
 .done h3 { margin: 6px 0 0; font: 700 28px var(--font-display); letter-spacing: -.02em; }
 .done p { margin: 0; color: var(--muted); max-width: 460px; }
 .receipt { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 18px; text-align: left; padding: 18px; border-radius: 22px; background: var(--surface); border: 1px solid var(--line); margin-top: 12px; }
+.receipt .rcol { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.receipt .rlink { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.receipt .rlink span { color: var(--muted); font-size: 13px; }
 .receipt .recs { display: flex; flex-direction: column; gap: 8px; }
-.receipt .recs div { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
+.receipt .recs > div { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
 .receipt .recs b { font-family: var(--font-mono); }
 .privlink { display: flex; gap: 8px; align-items: center; margin-top: 4px; min-width: 0; }
 .privlink input { flex: 1; min-width: 0; height: 42px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface-2); padding: 0 12px; font: 500 13px var(--font-mono); }
@@ -529,7 +540,7 @@ mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: in
 .justin { align-self: start; }
 
 .hourgroup, #evmain { scroll-margin-top: 190px; }
-.files.live .file { animation: none; }
+.files.uplive .file { animation: none; }
 .receipt .recs div > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receipt .recs div > b { white-space: nowrap; }
 @media (max-width: 600px) { .receipt { grid-template-columns: 1fr; } .receipt .qrbox { justify-self: center; order: -1; } }
@@ -658,7 +669,7 @@ mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: in
   .ehero .actions .btn { flex: 1 1 auto; }
 }
 @media (max-width: 760px), (pointer: coarse) {
-  .fnote, .privlink input, .timeedit { font-size: 16px; }
+  .fnote, .privlink input, .timeedit, .linkadd input { font-size: 16px; }
 }
 @media (pointer: coarse) {
   button.chip, a.chip, .tabs button, .btn-sm, .cats button, .iconbtn { height: 44px; min-height: 44px; }

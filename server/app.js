@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { ready, q, q1, next } from './db.js';
 import * as store from './storage.js';
 import { TEMPLATE } from './template.js';
+import { IMPORT_PART, probeLink, packPatches, unpackPatches, fetchPart, scrub, hasher, saveHash, posterFor } from './links.js';
 
 const env = process.env;
 const cfg = {
@@ -14,6 +15,7 @@ const cfg = {
   contact: env.CONTACT_EMAIL || '',
   operator: env.OPERATOR_NAME || '',
   repo: env.REPO_URL || '',
+  links: env.LINK_IMPORTS !== 'off',
 };
 const SECRET = env.APP_SECRET || crypto.createHash('sha256').update('roe:' + (env.DATABASE_URL || env.POSTGRES_URL || 'dev') + (env.ADMIN_PASSWORD || '')).digest('hex');
 const KINDS = ['Protest', 'March', 'Rally', 'Strike', 'Vigil', 'Election', 'Disaster', 'Accident', 'Public meeting', 'Other'];
@@ -183,7 +185,7 @@ async function eventBySlug(slug) { return q1(`${EVENT_SQL} where e.slug = $1`, [
 async function apiConfig() {
   return {
     name: cfg.name, moderation: cfg.moderation, maxFileBytes: cfg.maxFileBytes, storage: store.configured(),
-    contact: cfg.contact, operator: cfg.operator, repo: cfg.repo, kinds: KINDS,
+    links: cfg.links && store.configured(), contact: cfg.contact, operator: cfg.operator, repo: cfg.repo, kinds: KINDS,
   };
 }
 
@@ -314,16 +316,91 @@ async function batchFor(token, clipId) {
   return c;
 }
 
+/* ---------- videos added by link ---------- */
+// The checked link travels to the browser and back as a signed ticket, so starting the copy
+// doesn't repeat the check and the browser can't change what gets copied.
+const TICKET_TTL = 24 * 3600e3;
+const signTicket = (o) => { const p = Buffer.from(JSON.stringify(o)).toString('base64url'); return `${p}.${hmacHex('link|' + p).slice(0, 40)}`; };
+function readTicket(s) {
+  const [p, sig] = String(s || '').split('.');
+  const good = p ? hmacHex('link|' + p).slice(0, 40) : '';
+  const ok = sig && sig.length === good.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good));
+  const t = ok ? JSON.parse(Buffer.from(p, 'base64url').toString('utf8')) : null;
+  need(t && t.x > Date.now(), 'This link check has expired. Remove the video and add the link again.');
+  return t;
+}
+
+async function apiLinkProbe(req) {
+  need(cfg.links && store.configured(), 'Adding videos by link isn’t switched on for this site.', 503);
+  const b = await readBody(req);
+  await limit(req, 'link', 120);
+  const p = await probeLink(str(b.url, 2000), cfg.maxFileBytes);
+  const ticket = signTicket({ s: p.src.url, k: p.src.kind, i: p.src.id || null, z: p.size, r: p.ranged, m: p.mime, n: p.name, f: p.found, p: packPatches(p.patches), x: Date.now() + TICKET_TTL });
+  return {
+    ticket, name: p.name, size: p.size, mime: p.mime, host: p.src.host, thumb: p.thumb, modified: p.modified,
+    captured: p.captured, duration: p.duration, width: p.width, height: p.height, found: p.found, warning: p.warning,
+  };
+}
+
+// Copies the next parts of a linked video into storage, for about 20 s per request. Progress is
+// saved after every part with a compare-and-set, so a retried or doubled request never skips or
+// double-counts a part.
+const PULL_BUDGET = 20000;
+async function apiUploadPull(req) {
+  const b = await readBody(req);
+  const c = await batchFor(b.token, b.clip);
+  const job = c.link_job;
+  need(job, 'This upload isn’t a link.', 409);
+  const total = Math.ceil(job.t.z / IMPORT_PART);
+  if (c.status !== 'uploading' || job.n > total) return { done: total, of: total };
+  const patches = unpackPatches(job.t.p);
+  const [orig, stored] = await Promise.all([hasher(job.h), job.g ? hasher(job.g) : null]);
+  const t0 = Date.now();
+  const ahead = (n) => { const p = fetchPart(job.t, n); p.catch(() => {}); return p; };
+  let pending = ahead(job.n);
+  while (job.n <= total) {
+    const n = job.n;
+    const buf = await pending;
+    pending = n < total && Date.now() - t0 < PULL_BUDGET ? ahead(n + 1) : null; // fetch the next part while this one is stored
+    orig.update(buf);
+    const out = scrub(buf, (n - 1) * IMPORT_PART, patches);
+    if (stored) stored.update(out);
+    const etag = await store.putPart(c.storage_key, c.upload_id, n, out);
+    const nextJob = { ...job, n: n + 1, e: [...job.e, etag], h: saveHash(orig), g: stored ? saveHash(stored) : null };
+    const saved = await q1(`update clips set link_job = $1 where id = $2 and status = 'uploading' and (link_job->>'n')::int = $3 returning id`, [JSON.stringify(nextJob), c.id, n]);
+    if (!saved) { // another request for this clip got there first: report where it is
+      const cur = await q1(`select (link_job->>'n')::int as n from clips where id = $1`, [c.id]);
+      return { done: cur && cur.n ? cur.n - 1 : total, of: total };
+    }
+    Object.assign(job, nextJob);
+    if (!pending) break;
+  }
+  return { done: job.n - 1, of: total };
+}
+
+// A preview image made in the browser from the stored copy, for linked videos that came without one.
+async function apiUploadPoster(req) {
+  const b = await readBody(req);
+  const c = await batchFor(b.token, b.clip);
+  need(['pending', 'published'].includes(c.status), 'This video is no longer on record.', 409);
+  need((await store.size(c.poster_key)) > 0, 'The preview image did not arrive.', 422);
+  await q(`update clips set has_poster = true, duration = coalesce(duration, $2), width = coalesce(width, $3), height = coalesce(height, $4) where id = $1`,
+    [c.id, Number(b.duration) > 0 ? Number(b.duration) : null, Number(b.width) || null, Number(b.height) || null]);
+  return { ok: true };
+}
+
 async function apiUploadStart(req) {
   need(store.configured(), 'Uploads are not configured on this server yet.', 503);
   const b = await readBody(req);
   const f = b.file || {};
-  const size = Number(f.size);
+  const link = f.ticket ? readTicket(f.ticket) : null;
+  need(!link || cfg.links, 'Adding videos by link isn’t switched on for this site.', 503);
+  const size = link ? link.z : Number(f.size);
   need(Number.isFinite(size) && size > 0, 'Empty file');
   need(size <= cfg.maxFileBytes, `Files can be up to ${Math.round(cfg.maxFileBytes / 1024 ** 3)} GB.`, 413);
-  need(isHex64(f.sha256) && isHex64(f.sha256o), 'Missing fingerprint');
-  const mime = str(f.mime, 60);
-  const name = str(f.name, 160);
+  need(link || (isHex64(f.sha256) && isHex64(f.sha256o)), 'Missing fingerprint');
+  const mime = link ? link.m : str(f.mime, 60);
+  const name = link ? link.n : str(f.name, 160);
   need(!mime || mime.startsWith('video/') || VIDEO_EXT.includes(extOf(name)), 'Only video files can be uploaded.');
   const captured = new Date(f.captured);
   need(!isNaN(captured) && captured.getFullYear() >= 1990 && captured.getTime() < Date.now() + 864e5, 'Invalid filming time');
@@ -337,7 +414,7 @@ async function apiUploadStart(req) {
         d.record as dupe, d.status as dupe_status
       from events e left join lateral (select record, status from clips
         where (sha256_original = $4 or sha256 = $4 or sha256 = $5) and status in ('pending', 'published') limit 1) d on true
-      where e.slug = $1 and e.status <> 'hidden'`, [str(b.event, 120), token ? shaHex(token) : null, ip, f.sha256o, f.sha256]),
+      where e.slug = $1 and e.status <> 'hidden'`, [str(b.event, 120), token ? shaHex(token) : null, ip, link ? null : f.sha256o, link ? null : f.sha256]),
     hit(req, 'file'),
   ]);
   need(e, 'Event not found', 404);
@@ -357,20 +434,26 @@ async function apiUploadStart(req) {
     fresh ? q1('insert into batches (token, event_id, ip) values ($1, $2, $3) returning id', [shaHex(token), e.id, ip]).then((r) => r.id) : e.batch_id,
     place ? q1('insert into places (event_id, name) values ($1, $2) on conflict (event_id, lower(name)) do update set name = places.name returning id', [e.id, place]).then((r) => r.id) : null,
   ]);
-  const stripped = Array.isArray(f.stripped) ? f.stripped.filter((s) => typeof s === 'string').slice(0, 8).map((s) => s.slice(0, 40)) : [];
+  const stripped = (link ? link.f : Array.isArray(f.stripped) ? f.stripped : []).filter((s) => typeof s === 'string').slice(0, 8).map((s) => s.slice(0, 40));
   const timeSource = ['metadata', 'file', 'manual'].includes(f.ts) ? f.ts : 'file';
-  const clip = await q1(`insert into clips (event_id, batch_id, place_id, status, sensitive, note, name, captured_at, time_source, duration, width, height, size, mime, sha256, sha256_original, stripped, storage_key, poster_key, ip, upload_id)
-    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) returning id`,
+  let job = null;
+  if (link) {
+    const blank = saveHash(await hasher());
+    job = JSON.stringify({ t: link, n: 1, e: [], h: blank, g: link.p.length ? blank : null });
+  }
+  const clip = await q1(`insert into clips (event_id, batch_id, place_id, status, sensitive, note, name, captured_at, time_source, duration, width, height, size, mime, sha256, sha256_original, stripped, storage_key, poster_key, ip, upload_id, link_job)
+    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) returning id`,
   [e.id, batchId, placeId, !!b.sensitive, str(f.note, 500), name, captured.toISOString(), timeSource,
     Number(f.duration) > 0 ? Number(f.duration) : null, Number(f.width) || null, Number(f.height) || null, size, mime,
-    f.sha256, f.sha256o, stripped, key, posterKey, ip, uploadId]);
-  return { clip: clip.id, token: fresh ? token : undefined, posterUrl: store.putUrl(posterKey) };
+    link ? null : f.sha256, link ? null : f.sha256o, stripped, key, posterKey, ip, uploadId, job]);
+  return { clip: clip.id, token: fresh ? token : undefined, posterUrl: store.putUrl(posterKey), parts: link ? Math.ceil(size / IMPORT_PART) : undefined };
 }
 
 async function apiUploadParts(req) {
   const b = await readBody(req);
   const c = await batchFor(b.token, b.clip);
   need(c.status === 'uploading', 'This upload is already finished.', 409);
+  need(!c.link_job, 'This video is copied from its link by the server.', 409);
   const parts = (Array.isArray(b.parts) ? b.parts : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= PART_MAX).slice(0, 100);
   const urls = {};
   parts.forEach((n) => { urls[n] = store.partUrl(c.storage_key, c.upload_id, n); });
@@ -380,9 +463,28 @@ async function apiUploadParts(req) {
 async function apiUploadComplete(req) {
   const b = await readBody(req);
   const c = await batchFor(b.token, b.clip);
-  if (c.record && c.status !== 'uploading') return { record: c.record, status: c.status };
-  const parts = (Array.isArray(b.parts) ? b.parts : []).map((p) => ({ n: Number(p.n), etag: String(p.etag || '') })).sort((a, z) => a.n - z.n);
-  need(parts.length && parts.every((p, i) => p.n === i + 1 && p.etag), 'Some parts are missing.');
+  if (c.record && c.status !== 'uploading') return { record: c.record, status: c.status, poster: c.has_poster, sha256: c.sha256_original };
+  const job = c.link_job;
+  let parts, shao = null, sha = null, posterBuf = null;
+  if (job) {
+    need(job.n > Math.ceil(job.t.z / IMPORT_PART), 'The copy from the link isn’t finished yet.', 409);
+    shao = (await hasher(job.h)).digest('hex');
+    sha = job.g ? (await hasher(job.g)).digest('hex') : shao;
+    const [dupe, poster] = await Promise.all([
+      q1(`select record, status from clips where (sha256_original = $1 or sha256 = $1 or sha256 = $2) and status in ('pending', 'published') and id <> $3 limit 1`, [shao, sha, c.id]),
+      posterFor(job.t).catch(() => null),
+    ]);
+    if (dupe) {
+      await store.abortMultipart(c.storage_key, c.upload_id);
+      await q('delete from clips where id = $1', [c.id]);
+      return { duplicate: dupe.record, status: dupe.status };
+    }
+    parts = job.e.map((etag, k) => ({ n: k + 1, etag }));
+    posterBuf = poster;
+  } else {
+    parts = (Array.isArray(b.parts) ? b.parts : []).map((p) => ({ n: Number(p.n), etag: String(p.etag || '') })).sort((a, z) => a.n - z.n);
+    need(parts.length && parts.every((p, i) => p.n === i + 1 && p.etag), 'Some parts are missing.');
+  }
   await store.completeMultipart(c.storage_key, c.upload_id, parts);
   const got = await store.size(c.storage_key);
   if (got !== Number(c.size)) {
@@ -390,13 +492,17 @@ async function apiUploadComplete(req) {
     await q('delete from clips where id = $1', [c.id]);
     fail(422, 'The file did not arrive complete. Please upload it again.');
   }
-  const hasPoster = !!b.poster && (await store.size(c.poster_key)) > 0;
+  if (posterBuf) await store.putObject(c.poster_key, posterBuf).catch(() => { posterBuf = null; });
+  const hasPoster = job ? !!posterBuf : !!b.poster && (await store.size(c.poster_key)) > 0;
   const e = await q1('select date from events where id = $1', [c.event_id]);
   const d = yymmdd(e.date);
   const record = `ROE-${d}-${pad(await next('rec:' + d), 4)}`;
   const status = cfg.moderation === 'pre' ? 'pending' : 'published';
-  await q(`update clips set record = $1, status = $2, has_poster = $3, upload_id = null, published_at = case when $2 = 'published' then now() else null end where id = $4`, [record, status, hasPoster, c.id]);
-  return { record, status };
+  // The link isn't kept once the copy is done: it could lead back to the person who shared it.
+  await q(`update clips set record = $1, status = $2, has_poster = $3, upload_id = null, link_job = null,
+    sha256 = coalesce($5, sha256), sha256_original = coalesce($6, sha256_original),
+    published_at = case when $2 = 'published' then now() else null end where id = $4`, [record, status, hasPoster, c.id, sha, shao]);
+  return job ? { record, status, poster: hasPoster, sha256: shao, vu: hasPoster ? undefined : store.getUrl(c.storage_key) } : { record, status };
 }
 
 async function apiUploadAbort(req) {
@@ -693,6 +799,9 @@ const routes = [
   ['POST', /^\/api\/uploads\/parts$/, async (req) => apiUploadParts(req)],
   ['POST', /^\/api\/uploads\/complete$/, async (req) => apiUploadComplete(req)],
   ['POST', /^\/api\/uploads\/abort$/, async (req) => apiUploadAbort(req)],
+  ['POST', /^\/api\/uploads\/pull$/, async (req) => apiUploadPull(req)],
+  ['POST', /^\/api\/uploads\/poster$/, async (req) => apiUploadPoster(req)],
+  ['POST', /^\/api\/links\/probe$/, async (req) => apiLinkProbe(req)],
   ['POST', /^\/api\/receipt$/, async (req) => apiReceipt(req)],
   ['POST', /^\/api\/receipt\/withdraw$/, async (req) => apiWithdraw(req)],
   ['GET', /^\/api\/verify\/([0-9a-f]{64})$/, async (req, url, m) => apiVerify(m[1])],

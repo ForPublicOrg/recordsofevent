@@ -81,6 +81,29 @@ export function putUrl(key) {
   return presign('PUT', key, { expires: 6 * 3600 });
 }
 
+// Server-side writes, used when the server copies a video from a link.
+export async function putPart(key, uploadId, n, body) {
+  if (!s3) {
+    const dir = localPath(key) + '.parts';
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, String(n)), body);
+    return `"${crypto.createHash('md5').update(body).digest('hex')}"`;
+  }
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { headers } = await call('PUT', key, { partNumber: String(n), uploadId }, body);
+      const etag = headers.get('etag');
+      if (!etag) throw new Error('Storage did not return an ETag');
+      return etag;
+    } catch (e) { if (attempt >= 2) throw e; }
+  }
+}
+
+export async function putObject(key, body) {
+  if (!s3) { await fs.mkdir(path.dirname(localPath(key)), { recursive: true }); await fs.writeFile(localPath(key), body); return; }
+  await call('PUT', key, {}, body);
+}
+
 export async function completeMultipart(key, uploadId, parts) {
   if (!s3) {
     const dir = localPath(key) + '.parts';

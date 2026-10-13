@@ -20,6 +20,8 @@ Anyone can start an archive for an event, share its QR code, and everyone who wa
 
 Uploads go straight from the browser to storage in 8 MB parts using short-lived signed URLs, so large files never pass through Vercel. Uploads resume by themselves after a network drop. Playback works the same way: the API hands out signed links, and posters and videos load straight from storage.
 
+Videos can also be added by pasting a public link: Google Drive ("Anyone with the link"), Dropbox, OneDrive, or any direct link to a video file. The server checks the link, then copies the video into storage in 16 MB parts while the uploader's browser keeps the copy going, so it resumes after a dropped connection. Location and phone details are removed and fingerprints are taken just like for uploaded files, and the link itself isn't stored once the copy is done. Links to YouTube, Instagram, TikTok and similar sites can't be copied; people save the video and upload the file instead. Private network addresses are refused.
+
 `npm run build` writes `dist/`: the app is split into content-hashed files under `dist/assets/` (cached forever by browsers; the upload, moderation and verify code loads only when needed), and `dist/index.html` plus `server/template.js` are rewritten to point at them. Fingerprinting runs in a Web Worker built to `dist/hash-worker.js`.
 
 ## Deploy (about 20 minutes)
@@ -103,6 +105,7 @@ Open http://localhost:3000 (moderation at `/admin`, password `admin` unless `ADM
 
 - Default limits: 5 GB per file, 50 GB per person per day (`MAX_FILE_GB`, `DAILY_UPLOAD_GB`), plus rate limits on events, uploads, reports and sign-in.
 - Vercel Hobby is free for personal, non-commercial projects; Neon has a free tier; R2 charges about $0.015 per GB stored per month and nothing for viewing.
+- Videos added by link pass through the Vercel function while they're copied, which counts toward the function's bandwidth and run time. Set `LINK_IMPORTS=off` to hide the option.
 - Videos are stored and played as uploaded. Browsers that can't play a format (for example HEVC on some desktops) offer the original file as a download.
 
 ## Licence
