@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import * as esbuild from 'esbuild';
-import { web, fontPath, bundleOptions, css, writeTemplate, loadEnv } from './shared.mjs';
+import { root, web, fontPath, bundleOptions, workerEntry, workerOptions, css, writeTemplate, loadEnv } from './shared.mjs';
 
 loadEnv();
 process.env.ADMIN_PASSWORD ||= 'admin';
@@ -32,6 +32,18 @@ function sendFile(req, res, file, extra = {}) {
     if (req.method === 'HEAD') res.end(); else fs.createReadStream(file).pipe(res);
   }
 }
+
+// The dev bundle lives in memory: /app.js is the entry (rebuilt on every request), /assets/* its
+// chunks. Chunks from earlier builds are kept so a page that loaded an older /app.js still works.
+const OUT = path.join(root, '.data', 'dev-bundle'); // never written, only names the outputs
+const chunks = new Map();
+async function bundle() {
+  const r = await esbuild.build({ ...bundleOptions, absWorkingDir: root, outdir: OUT, entryNames: '[name]', write: false, sourcemap: 'inline' });
+  if (chunks.size > 400) chunks.clear();
+  for (const f of r.outputFiles) chunks.set('/' + path.relative(OUT, f.path).split(path.sep).join('/'), f.text);
+  return chunks;
+}
+const sendJs = (res, text) => res.writeHead(200, { 'content-type': TYPES['.js'], 'cache-control': 'no-store' }).end(text);
 
 // Stand-in for S3/R2 when no bucket is configured (presigned URLs point here).
 async function localStorage(req, res, url) {
@@ -59,10 +71,14 @@ http.createServer(async (req, res) => {
   const p = url.pathname;
   try {
     if (p.startsWith('/__storage/')) return await localStorage(req, res, url);
-    if (p === '/app.js') {
-      const r = await esbuild.build({ ...bundleOptions, write: false, sourcemap: 'inline' });
-      res.writeHead(200, { 'content-type': TYPES['.js'], 'cache-control': 'no-store' }).end(r.outputFiles[0].text);
-      return;
+    if (p === '/app.js') return sendJs(res, (await bundle()).get('/main.js'));
+    if (p.startsWith('/assets/') && p.endsWith('.js')) {
+      const text = chunks.get(p) ?? (await bundle()).get(p);
+      if (text !== undefined) return sendJs(res, text);
+    }
+    if (p === '/hash-worker.js' && fs.existsSync(workerEntry)) {
+      const r = await esbuild.build({ ...workerOptions, write: false, sourcemap: 'inline' });
+      return sendJs(res, r.outputFiles[0].text);
     }
     if (p === '/styles.css') { res.writeHead(200, { 'content-type': TYPES['.css'], 'cache-control': 'no-store' }).end(css()); return; }
     if (p.startsWith('/fonts/')) { const f = fontPath(path.basename(p)); if (f) return sendFile(req, res, f); }

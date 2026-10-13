@@ -9,7 +9,8 @@ async function connect() {
   const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
   if (url) {
     const { default: postgres } = await import('postgres');
-    const sql = postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 10, onnotice: () => {} });
+    // A few connections so independent queries in one request run side by side (Neon's pooler makes this cheap).
+    const sql = postgres(url, { prepare: false, max: 4, idle_timeout: 20, connect_timeout: 10, onnotice: () => {} });
     return {
       query: (text, params = []) => sql.unsafe(text, params),
       exec: (text) => sql.unsafe(text),
@@ -28,12 +29,14 @@ async function connect() {
   };
 }
 
+// Connects once per instance and checks the schema version in a single round trip; only a
+// version mismatch (first run or after a deploy that bumps SCHEMA_VERSION) runs the DDL.
 export function ready() {
   if (!readyPromise) {
     readyPromise = (async () => {
       driver = await connect();
       let v = null;
-      try { v = (await driver.query('select v from meta where k = $1', ['schema']))[0]?.v; } catch { /* first run */ }
+      try { v = (await driver.query(`select v from meta where k = 'schema'`))[0]?.v; } catch { /* first run */ }
       if (v !== SCHEMA_VERSION) {
         await driver.exec(`begin; select pg_advisory_xact_lock(7342019); ${SCHEMA}
           insert into meta (k, v) values ('schema', '${SCHEMA_VERSION}') on conflict (k) do update set v = excluded.v; commit;`);

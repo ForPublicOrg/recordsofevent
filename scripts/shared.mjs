@@ -16,23 +16,47 @@ export const FONTS = {
 };
 export const fontPath = (name) => FONTS[name] && path.join(root, 'node_modules', FONTS[name]);
 
+// The app is split: main.js is the entry, dynamic import()s (upload, admin, mp4…) become chunks
+// under assets/. Callers add outdir and entryNames.
 export const bundleOptions = {
-  entryPoints: [path.join(web, 'js/main.js')],
+  entryPoints: { main: path.join(web, 'js/main.js') },
   bundle: true,
+  splitting: true,
   format: 'esm',
+  chunkNames: 'assets/[name]-[hash]',
   target: ['es2020', 'safari15'],
   legalComments: 'none',
   logLevel: 'warning',
 };
 
+// Hashing runs in a Web Worker loaded from /hash-worker.js (a classic script, so every browser can start it).
+export const workerEntry = path.join(web, 'js/hash-worker.js');
+export const workerOptions = {
+  entryPoints: [workerEntry],
+  bundle: true,
+  format: 'iife',
+  target: ['es2020', 'safari15'],
+  legalComments: 'none',
+  logLevel: 'warning',
+};
+
+export const CSS_FILES = ['styles.css', 'pages.css', 'player.css'];
 export function css() {
-  const extra = path.join(web, 'pages.css');
-  return fs.readFileSync(path.join(web, 'styles.css'), 'utf8') + (fs.existsSync(extra) ? '\n' + fs.readFileSync(extra, 'utf8') : '');
+  return CSS_FILES.map((f) => path.join(web, f)).filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+}
+
+// Points the HTML at built files: { '/app.js': '/assets/main-X.js', … }. Extra <head> tags go before </head>.
+export function rewriteHtml(html, map, headExtra = '') {
+  for (const [from, to] of Object.entries(map)) {
+    const n = html.split(`"${from}"`).length - 1;
+    if (n !== 1) throw new Error(`web/index.html must reference "${from}" exactly once (found ${n})`);
+    html = html.replace(`"${from}"`, `"${to}"`);
+  }
+  return headExtra ? html.replace('</head>', headExtra + '</head>') : html;
 }
 
 // The server injects per-page <head> tags into this template (see server/app.js → page()).
-export function writeTemplate() {
-  const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
+export function writeTemplate(html = fs.readFileSync(path.join(web, 'index.html'), 'utf8')) {
   fs.writeFileSync(path.join(root, 'server/template.js'), `// Generated from web/index.html by scripts/build.mjs — do not edit.\nexport const TEMPLATE = ${JSON.stringify(html)};\n`);
 }
 

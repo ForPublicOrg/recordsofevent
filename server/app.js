@@ -47,11 +47,13 @@ function clientIp(req) {
 // IPs are never stored. A keyed hash that changes every day is enough for rate limits.
 const ipHash = (req) => hmacHex(clientIp(req) + '|' + new Date().toISOString().slice(0, 10)).slice(0, 24);
 
-async function limit(req, name, max, windowSec = 3600) {
+// Counts a hit and returns the total for this window; limit() turns it into a 429.
+async function hit(req, name, windowSec = 3600) {
   const w = Math.floor(Date.now() / 1000 / windowSec);
-  const r = await q1('insert into hits (k, w) values ($1, $2) on conflict (k, w) do update set n = hits.n + 1 returning n', [name + ':' + ipHash(req), w]);
-  if (r.n > max) fail(429, 'Too many requests from your connection. Please wait a little and try again.');
+  return (await q1('insert into hits (k, w) values ($1, $2) on conflict (k, w) do update set n = hits.n + 1 returning n', [name + ':' + ipHash(req), w])).n;
 }
+const tooMany = (n, max) => { if (n > max) fail(429, 'Too many requests from your connection. Please wait a little and try again.'); };
+async function limit(req, name, max, windowSec = 3600) { tooMany(await hit(req, name, windowSec), max); }
 
 function siteUrl(req) {
   if (env.SITE_URL) return env.SITE_URL.replace(/\/+$/, '');
@@ -107,14 +109,21 @@ function requireAdmin(req) {
 const log = (actor, action, target, detail = null) => q('insert into modlog (actor, action, target, detail) values ($1, $2, $3, $4)', [actor, action, target, detail ? JSON.stringify(detail) : null]);
 
 /* ---------- serializers ---------- */
-const EVENT_SQL = `select e.*,
-  (select count(*)::int from clips c where c.event_id = e.id and c.status = 'published') as n,
-  (select count(*)::int from clips c where c.event_id = e.id and c.status = 'pending') as pending,
-  (select count(*)::int from clips c where c.event_id = e.id and c.status = 'published' and c.label in ('verified', 'consistent')) as checked,
-  (select coalesce(sum(c.duration), 0)::float8 from clips c where c.event_id = e.id and c.status = 'published') as secs,
-  (select max(c.created_at) from clips c where c.event_id = e.id and c.status in ('pending', 'published')) as last_upload,
-  (select count(*)::int from places p where p.event_id = e.id) as nplaces
-  from events e`;
+// One pass over each event's clips (index clips_event) instead of a subquery per figure.
+const EVENT_SQL = `select e.id, e.slug, e.code, e.title, e.kind, e.date, e.tz, e.city, e.country, e.aliases, e.summary,
+  e.figures, e.sources, e.color, e.status, e.created_at, e.updated_at,
+  s.n, s.pending, s.checked, coalesce(s.secs, 0)::float8 as secs, s.last_upload, pl.nplaces
+  from events e
+  left join lateral (select count(*) filter (where c.status = 'published')::int as n,
+    count(*) filter (where c.status = 'pending')::int as pending,
+    count(*) filter (where c.status = 'published' and c.label in ('verified', 'consistent'))::int as checked,
+    sum(c.duration) filter (where c.status = 'published') as secs,
+    max(c.created_at) as last_upload
+    from clips c where c.event_id = e.id and c.status in ('pending', 'published')) s on true
+  left join lateral (select count(*)::int as nplaces from places p where p.event_id = e.id) pl on true`;
+// Columns pubClip needs (keys are only used to sign media URLs, never sent as-is).
+const CLIP_COLS = `c.id, c.record, c.event_id, c.place_id, c.captured_at, c.duration, c.width, c.height, c.label, c.sensitive, c.note,
+  c.size, c.sha256, c.sha256_original, c.time_source, c.has_poster, c.mime, c.stripped, c.published_at, c.storage_key, c.poster_key`;
 
 const isLive = (e) => e.status !== 'hidden' && ((e.last_upload && Date.now() - new Date(e.last_upload).getTime() < 3 * 3600e3) || e.date === todayIn(e.tz));
 
@@ -126,23 +135,38 @@ function pubEvent(e, extra = {}) {
     n: e.n ?? 0, pending: e.pending ?? 0, checked: e.checked ?? 0, secs: e.secs ?? 0, nplaces: e.nplaces ?? 0, ...extra,
   };
 }
+// Signed storage URLs go straight into the JSON so browsers skip the /m/* redirect (function +
+// DB + 302) per image and video. They stay valid for 6+ hours, far longer than any API cache.
+const posterUrl = (c) => (c.has_poster && c.poster_key ? store.getUrl(c.poster_key) : null);
+const downloadName = (c) => `${c.record}.${extOf(c.storage_key)}`;
 function pubClip(c) {
   return {
     r: c.record, t: c.captured_at, d: c.duration, w: c.width, h: c.height, p: c.place_id, s: c.label, x: c.sensitive,
     n: c.note, z: c.size, sha: c.sha256, sho: c.sha256_original, ts: c.time_source, img: c.has_poster, m: c.mime,
     stripped: c.stripped || [], at: c.published_at,
+    pu: posterUrl(c), vu: store.getUrl(c.storage_key), du: store.getUrl(c.storage_key, { download: downloadName(c) }),
   };
 }
 
+// Cover pick: landscape first, then most recently published; never sensitive or poster-less.
+const COVER_ORDER = '(width >= height) desc nulls last, published_at desc';
+const coverRank = (c) => (c.width == null || c.height == null ? 0 : c.width >= c.height ? 2 : 1);
+const pickCovers = (clips, n) => clips.filter((c) => c.has_poster && !c.sensitive)
+  .sort((a, b) => coverRank(b) - coverRank(a) || new Date(b.published_at) - new Date(a.published_at)).slice(0, n);
+const coverOut = (rows) => ({ covers: rows.map((r) => r.record), coverUrls: rows.map((r) => store.getUrl(r.poster_key)) });
+
+// { [event id]: [{ record, poster_key }] }
 async function coversFor(ids, perEvent = 1) {
   if (!ids.length) return {};
-  const rows = await q(`select event_id, record from (
-      select event_id, record, row_number() over (partition by event_id order by (width >= height) desc nulls last, published_at desc) as rn
+  const rows = await q(`select event_id, record, poster_key from (
+      select event_id, record, poster_key, row_number() over (partition by event_id order by ${COVER_ORDER}) as rn
       from clips where status = 'published' and has_poster and not sensitive and event_id = any($1)) x where rn <= $2`, [ids, perEvent]);
   const out = {};
-  rows.forEach((r) => { (out[r.event_id] = out[r.event_id] || []).push(r.record); });
+  rows.forEach((r) => { (out[r.event_id] = out[r.event_id] || []).push(r); });
   return out;
 }
+// Fields for an event card: `cover` record plus its signed `coverUrl`.
+const cardCover = (rows) => { const r = rows?.[0]; return { cover: r ? r.record : null, coverUrl: r ? store.getUrl(r.poster_key) : null }; };
 async function sparksFor(ids, bins = 22) {
   if (!ids.length) return {};
   const rows = await q(`with r as (select event_id, min(captured_at) as mn, max(captured_at) as mx from clips where status = 'published' and event_id = any($1) group by event_id)
@@ -163,37 +187,44 @@ async function apiConfig() {
   };
 }
 
+// Two round-trip levels: events + just-in together, then everything that needs the event ids.
 async function apiHome() {
-  const rows = await q(`${EVENT_SQL} where e.status = 'published' order by e.date desc, e.id desc limit 60`);
-  const ids = rows.map((e) => e.id);
-  const [covers, sparks] = await Promise.all([coversFor(ids), sparksFor(ids)]);
-  const events = rows.map((e) => pubEvent(e, { cover: covers[e.id]?.[0] || null, spark: sparks[e.id] || null }))
-    .sort((a, b) => (b.live - a.live) || (b.live && a.live ? b.n - a.n : 0));
-  const featured = events.find((e) => e.n > 0) || events[0] || null;
-  let latest = [], featuredCovers = [], places = [];
-  if (featured) {
-    const id = rows.find((e) => e.slug === featured.slug).id;
-    latest = (await q(`select * from clips where event_id = $1 and status = 'published' and not sensitive order by captured_at desc limit 12`, [id])).map(pubClip);
-    featuredCovers = (await coversFor([id], 4))[id] || [];
-    places = await q('select id, name from places where event_id = $1', [id]);
-  }
-  const justIn = (await q(`select c.*, e.slug, e.title, e.color, e.tz, p.name as place from clips c
+  const [rows, justInRows] = await Promise.all([
+    q(`${EVENT_SQL} where e.status = 'published' order by e.date desc, e.id desc limit 60`),
+    q(`select ${CLIP_COLS}, e.slug, e.title, e.color, e.tz, p.name as place from clips c
       join events e on e.id = c.event_id left join places p on p.id = c.place_id
-      where c.status = 'published' and e.status = 'published' and not c.sensitive order by c.published_at desc limit 6`))
-    .map((c) => ({ ...pubClip(c), slug: c.slug, title: c.title, color: c.color, tz: c.tz, place: c.place }));
-  return { events, featured: featured && { ...featured, covers: featuredCovers, places }, latest, justIn };
+      where c.status = 'published' and e.status = 'published' and not c.sensitive order by c.published_at desc limit 6`),
+  ]);
+  const ids = rows.map((e) => e.id);
+  const order = rows.map((e) => ({ e, live: isLive(e), n: e.n ?? 0 }))
+    .sort((a, b) => (b.live - a.live) || (b.live && a.live ? b.n - a.n : 0));
+  const top = (order.find((o) => o.n > 0) || order[0])?.e || null;
+  const [covers, sparks, latestRows, places] = await Promise.all([
+    coversFor(ids, 4), sparksFor(ids),
+    top ? q(`select ${CLIP_COLS} from clips c where c.event_id = $1 and c.status = 'published' and not c.sensitive order by c.captured_at desc limit 12`, [top.id]) : [],
+    top ? q('select id, name from places where event_id = $1', [top.id]) : [],
+  ]);
+  const events = order.map(({ e }) => pubEvent(e, { ...cardCover(covers[e.id]), spark: sparks[e.id] || null }));
+  const featured = top && events.find((e) => e.slug === top.slug);
+  const justIn = justInRows.map((c) => ({ ...pubClip(c), slug: c.slug, title: c.title, color: c.color, tz: c.tz, place: c.place }));
+  return { events, featured: featured && { ...featured, ...coverOut(covers[top.id] || []), places }, latest: latestRows.map(pubClip), justIn };
 }
 
+// All three queries go out at once, keyed by slug; covers and place counts come from the clip list.
 async function apiEvent(req, slug) {
-  const e = await eventBySlug(slug);
+  const [e, placeRows, clips] = await Promise.all([
+    eventBySlug(slug),
+    q('select p.id, p.name from places p join events e on e.id = p.event_id where e.slug = $1', [slug]),
+    q(`select ${CLIP_COLS} from clips c join events e on e.id = c.event_id where e.slug = $1 and c.status = 'published' order by c.captured_at, c.id`, [slug]),
+  ]);
   need(e, 'Event not found', 404);
   if (e.status === 'hidden' && !adminOf(req)) return { removed: true, title: e.title };
-  const [places, clips, covers] = await Promise.all([
-    q(`select p.id, p.name, (select count(*)::int from clips c where c.place_id = p.id and c.status = 'published') as n from places p where p.event_id = $1 order by n desc, p.name`, [e.id]),
-    q(`select * from clips where event_id = $1 and status = 'published' order by captured_at, id`, [e.id]),
-    coversFor([e.id], 4),
-  ]);
-  return { event: pubEvent(e, { places, covers: covers[e.id] || [] }), clips: clips.map(pubClip) };
+  const count = {};
+  clips.forEach((c) => { if (c.place_id != null) count[c.place_id] = (count[c.place_id] || 0) + 1; });
+  const places = placeRows.map((p) => ({ id: p.id, name: p.name, n: count[p.id] || 0 }))
+    .sort((a, b) => b.n - a.n || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const covers = pickCovers(clips, 4);
+  return { event: pubEvent(e, { places, ...coverOut(covers), coverUrl: covers[0] ? store.getUrl(covers[0].poster_key) : null }), clips: clips.map(pubClip) };
 }
 
 async function apiRecord(rec) {
@@ -209,7 +240,7 @@ async function apiSearch(url) {
   const out = { events: [], places: [], records: [] };
   const rec = raw.toUpperCase().replace(/\s+/g, '').match(/^ROE-?(\d{6})-?(\d{1,6})$/);
   if (rec) {
-    const r = await q(`select c.*, e.slug, e.title, e.color, e.tz from clips c join events e on e.id = c.event_id
+    const r = await q(`select ${CLIP_COLS}, e.slug, e.title, e.color, e.tz from clips c join events e on e.id = c.event_id
       where c.status = 'published' and c.record like $1 order by c.record limit 6`, [`ROE-${rec[1]}-%${rec[2]}%`]);
     out.records = r.map((c) => ({ ...pubClip(c), slug: c.slug, title: c.title, color: c.color, tz: c.tz }));
   }
@@ -235,7 +266,7 @@ async function apiSearch(url) {
     }
     const rows = await q(`${EVENT_SQL} where e.status = any($1) and (${where}) order by e.date desc limit ${mode === 'dupe' ? 3 : 8}`, params);
     const covers = await coversFor(rows.map((e) => e.id));
-    out.events = rows.map((e) => pubEvent(e, { cover: covers[e.id]?.[0] || null }));
+    out.events = rows.map((e) => pubEvent(e, cardCover(covers[e.id])));
   }
   if (words.length && mode !== 'dupe') {
     out.places = await q(`select p.id, p.name, e.slug, e.title, e.color, (select count(*)::int from clips c where c.place_id = p.id and c.status = 'published') as n
@@ -287,8 +318,6 @@ async function apiUploadStart(req) {
   need(store.configured(), 'Uploads are not configured on this server yet.', 503);
   const b = await readBody(req);
   const f = b.file || {};
-  const e = await q1(`select * from events where slug = $1 and status <> 'hidden'`, [str(b.event, 120)]);
-  need(e, 'Event not found', 404);
   const size = Number(f.size);
   need(Number.isFinite(size) && size > 0, 'Empty file');
   need(size <= cfg.maxFileBytes, `Files can be up to ${Math.round(cfg.maxFileBytes / 1024 ** 3)} GB.`, 413);
@@ -298,38 +327,43 @@ async function apiUploadStart(req) {
   need(!mime || mime.startsWith('video/') || VIDEO_EXT.includes(extOf(name)), 'Only video files can be uploaded.');
   const captured = new Date(f.captured);
   need(!isNaN(captured) && captured.getFullYear() >= 1990 && captured.getTime() < Date.now() + 864e5, 'Invalid filming time');
-  await limit(req, 'file', 300);
   const ip = ipHash(req);
-  const used = (await q1(`select coalesce(sum(size), 0)::float8 as s from clips where ip = $1 and created_at > now() - interval '1 day'`, [ip])).s;
-  need(used + size <= cfg.dailyBytes, 'Daily upload limit reached for your connection. Please try again tomorrow.', 429);
+  let token = typeof b.token === 'string' && b.token ? b.token : null;
+  // Round trip 1: event, existing batch, daily usage and duplicate check in one query, next to the rate-limit hit.
+  const [e, hits] = await Promise.all([
+    q1(`select e.id, e.date,
+        (select b.id from batches b where b.token = $2 and b.event_id = e.id) as batch_id,
+        (select coalesce(sum(size), 0)::float8 from clips where ip = $3 and created_at > now() - interval '1 day') as used,
+        d.record as dupe, d.status as dupe_status
+      from events e left join lateral (select record, status from clips
+        where (sha256_original = $4 or sha256 = $4 or sha256 = $5) and status in ('pending', 'published') limit 1) d on true
+      where e.slug = $1 and e.status <> 'hidden'`, [str(b.event, 120), token ? shaHex(token) : null, ip, f.sha256o, f.sha256]),
+    hit(req, 'file'),
+  ]);
+  need(e, 'Event not found', 404);
+  tooMany(hits, 300);
+  need(e.used + size <= cfg.dailyBytes, 'Daily upload limit reached for your connection. Please try again tomorrow.', 429);
+  if (e.dupe) return { duplicate: e.dupe, status: e.dupe_status };
 
-  const dupe = await q1(`select record, status from clips where (sha256_original = $1 or sha256 = $1 or sha256 = $2) and status in ('pending', 'published') limit 1`, [f.sha256o, f.sha256]);
-  if (dupe) return { duplicate: dupe.record, status: dupe.status };
-
-  let token = typeof b.token === 'string' ? b.token : null, batch = null, fresh = false;
-  if (token) batch = await q1('select * from batches where token = $1 and event_id = $2', [shaHex(token), e.id]);
-  if (!batch) {
-    token = crypto.randomBytes(24).toString('base64url'); fresh = true;
-    batch = await q1('insert into batches (token, event_id, ip) values ($1, $2, $3) returning *', [shaHex(token), e.id, ip]);
-  }
-  let placeId = null;
-  const place = str(b.place, 80);
-  if (place) {
-    const p = await q1('insert into places (event_id, name) values ($1, $2) on conflict (event_id, lower(name)) do update set name = places.name returning id', [e.id, place]);
-    placeId = p.id;
-  }
   const id = crypto.randomBytes(12).toString('hex');
   const key = `v/${e.date.slice(0, 4)}/${e.id}/${id}.${extOf(name)}`;
   const posterKey = `p/${e.date.slice(0, 4)}/${e.id}/${id}.jpg`;
+  const fresh = !e.batch_id;
+  if (fresh) token = crypto.randomBytes(24).toString('base64url');
+  const place = str(b.place, 80);
+  // Round trip 2: storage multipart, new batch and place upsert side by side.
+  const [uploadId, batchId, placeId] = await Promise.all([
+    store.createMultipart(key),
+    fresh ? q1('insert into batches (token, event_id, ip) values ($1, $2, $3) returning id', [shaHex(token), e.id, ip]).then((r) => r.id) : e.batch_id,
+    place ? q1('insert into places (event_id, name) values ($1, $2) on conflict (event_id, lower(name)) do update set name = places.name returning id', [e.id, place]).then((r) => r.id) : null,
+  ]);
   const stripped = Array.isArray(f.stripped) ? f.stripped.filter((s) => typeof s === 'string').slice(0, 8).map((s) => s.slice(0, 40)) : [];
   const timeSource = ['metadata', 'file', 'manual'].includes(f.ts) ? f.ts : 'file';
-  const clip = await q1(`insert into clips (event_id, batch_id, place_id, status, sensitive, note, name, captured_at, time_source, duration, width, height, size, mime, sha256, sha256_original, stripped, storage_key, poster_key, ip)
-    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) returning id`,
-  [e.id, batch.id, placeId, !!b.sensitive, str(f.note, 500), name, captured.toISOString(), timeSource,
+  const clip = await q1(`insert into clips (event_id, batch_id, place_id, status, sensitive, note, name, captured_at, time_source, duration, width, height, size, mime, sha256, sha256_original, stripped, storage_key, poster_key, ip, upload_id)
+    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) returning id`,
+  [e.id, batchId, placeId, !!b.sensitive, str(f.note, 500), name, captured.toISOString(), timeSource,
     Number(f.duration) > 0 ? Number(f.duration) : null, Number(f.width) || null, Number(f.height) || null, size, mime,
-    f.sha256, f.sha256o, stripped, key, posterKey, ip]);
-  const uploadId = await store.createMultipart(key);
-  await q('update clips set upload_id = $1 where id = $2', [uploadId, clip.id]);
+    f.sha256, f.sha256o, stripped, key, posterKey, ip, uploadId]);
   return { clip: clip.id, token: fresh ? token : undefined, posterUrl: store.putUrl(posterKey) };
 }
 
@@ -463,7 +497,7 @@ async function media(req, res, kind, rec) {
   const ok = c && (c.status === 'published' || (adminOf(req) && !['withdrawn', 'removed', 'rejected'].includes(c.status)));
   if (!ok || (kind === 'p' && !c.has_poster)) return send(res, 404, 'Not found', { 'content-type': 'text/plain', 'cache-control': 'public, max-age=60' });
   const key = kind === 'p' ? c.poster_key : c.storage_key;
-  const url = store.getUrl(key, kind === 'd' ? { download: `${c.record}.${extOf(c.storage_key)}` } : {});
+  const url = store.getUrl(key, kind === 'd' ? { download: downloadName(c) } : {});
   send(res, 302, '', { location: url, 'cache-control': c.status === 'published' ? 'public, max-age=1800, s-maxage=1800' : 'no-store' });
 }
 
@@ -610,10 +644,12 @@ async function page(req, res, path, template) {
   let status = 200;
   const m = path.match(/^\/(e|upload)\/([a-z0-9-]+)/) || path.match(/^\/r\/(ROE-\d{6}-\d+)/i);
   try {
+    if (m) await ready();
     if (m && m[1] !== undefined && (m[1] === 'e' || m[1] === 'upload')) {
-      const e = await eventBySlug(m[2]);
+      const [e, coverRow] = await Promise.all([eventBySlug(m[2]), q1(`select c.record from clips c join events e on e.id = c.event_id
+        where e.slug = $1 and c.status = 'published' and c.has_poster and not c.sensitive order by ${COVER_ORDER} limit 1`, [m[2]])]);
       if (e && e.status !== 'hidden') {
-        const cover = (await coversFor([e.id]))[e.id]?.[0];
+        const cover = coverRow?.record;
         title = `${e.title} · ${fmtDate(e.date)}`;
         desc = `${e.n} video${e.n === 1 ? '' : 's'} from ${e.city}${e.country ? ', ' + e.country : ''}. ${m[1] === 'upload' ? 'Were you there? Add your footage.' : 'Raw footage, in the order it was filmed.'}`;
         if (cover) image = `${site}/m/p/${cover}`;
@@ -642,8 +678,9 @@ async function page(req, res, path, template) {
 }
 
 /* ---------- router ---------- */
+// [method, path, handler, CDN seconds, needs the database (default true)]
 const routes = [
-  ['GET', /^\/api\/config$/, async () => apiConfig(), 300],
+  ['GET', /^\/api\/config$/, async () => apiConfig(), 300, false],
   ['GET', /^\/api\/home$/, async () => apiHome(), 20],
   ['GET', /^\/api\/search$/, async (req, url) => apiSearch(url), 20],
   ['POST', /^\/api\/events$/, async (req) => apiCreateEvent(req)],
@@ -661,8 +698,8 @@ const routes = [
   ['GET', /^\/api\/verify\/([0-9a-f]{64})$/, async (req, url, m) => apiVerify(m[1])],
   ['POST', /^\/api\/reports$/, async (req) => apiReport(req)],
   ['POST', /^\/api\/admin\/login$/, async (req, url, m, res) => adminLogin(req, res)],
-  ['POST', /^\/api\/admin\/logout$/, async (req, url, m, res) => { res.setHeader('set-cookie', 'roe_admin=; Path=/; Max-Age=0; SameSite=Strict'); return { ok: true }; }],
-  ['GET', /^\/api\/admin\/me$/, async (req) => ({ name: requireAdmin(req) })],
+  ['POST', /^\/api\/admin\/logout$/, async (req, url, m, res) => { res.setHeader('set-cookie', 'roe_admin=; Path=/; Max-Age=0; SameSite=Strict'); return { ok: true }; }, 0, false],
+  ['GET', /^\/api\/admin\/me$/, async (req) => ({ name: requireAdmin(req) }), 0, false],
   ['GET', /^\/api\/admin\/queue$/, async (req, url) => { requireAdmin(req); return adminQueue(url); }],
   ['GET', /^\/api\/admin\/find$/, async (req, url) => { requireAdmin(req); return adminFind(url); }],
   ['POST', /^\/api\/admin\/clip$/, async (req) => adminClipAction(req, requireAdmin(req))],
@@ -682,15 +719,18 @@ export default async function handler(req, res, opts = {}) {
     }
     const mm = path.match(/^\/m\/([pvd])\/([A-Za-z0-9-]+)$/);
     if (mm) { await ready(); return await media(req, res, mm[1], mm[2]); }
-    if (!path.startsWith('/api/')) { await ready(); return await page(req, res, path, opts.template || TEMPLATE); }
-    for (const [method, re, fn, cache] of routes) {
+    if (!path.startsWith('/api/')) return await page(req, res, path, opts.template || TEMPLATE);
+    // `?fresh=1` skips the CDN cache: the CDN keys on the URL only, so moderators (whose answers
+    // differ, e.g. hidden events) and must-be-current reads send it and get an uncached reply.
+    const shared = !url.searchParams.has('fresh') && !adminOf(req);
+    for (const [method, re, fn, cache, db = true] of routes) {
       const m = path.match(re);
       if (!m) continue;
       if (req.method !== method && !(method === 'GET' && req.method === 'HEAD')) continue;
-      await ready();
+      if (db) await ready();
       const out = await fn(req, url, m, res);
       if (res.writableEnded) return;
-      return send(res, 200, out, cache && !adminOf(req) ? cached(cache) : {});
+      return send(res, 200, out, cache && shared ? cached(cache) : {});
     }
     return send(res, 404, { error: 'Not found' });
   } catch (err) {

@@ -283,7 +283,8 @@ async function eachChunk(file, onProgress, fn) {
   if (!size) onProgress?.(1);
 }
 
-export async function fingerprint(file, patches = [], onProgress) {
+// Hashes on the calling thread. Runs inside hash-worker.js, and here as the fallback.
+export async function hashLocal(file, patches = [], onProgress) {
   const list = [...patches].sort((a, b) => a.offset - b.offset);
   const orig = await createSHA256();
   const stored = list.length ? await createSHA256() : null;
@@ -304,6 +305,46 @@ export async function fingerprint(file, patches = [], onProgress) {
   });
   const original = orig.digest('hex');
   return { original, stored: stored ? stored.digest('hex') : original };
+}
+
+// Hashing runs in a Web Worker so the page stays responsive. If the worker can't start
+// (blocked, missing, old browser) or goes quiet, the job is redone on the main thread.
+let W = null, wid = 0;
+const jobs = new Map();
+function hashWorker() {
+  if (W !== null) return W;
+  try { W = new Worker('/hash-worker.js'); } catch { return (W = false); }
+  W.onmessage = ({ data: m }) => {
+    const j = jobs.get(m && m.id); if (!j) return;
+    clearTimeout(j.timer);
+    if (m.ack) return;
+    if ('p' in m) { j.started = true; j.onProgress?.(m.p); return; }
+    jobs.delete(m.id);
+    if (m.result) j.resolve(m.result);
+    else if (j.started) j.reject(new Error(m.error || 'File could not be read')); // reading failed part-way
+    else j.fallback(); // failed before hashing began (e.g. WebAssembly blocked in workers)
+  };
+  W.onerror = (e) => { e.preventDefault?.(); killWorker(); };
+  return W;
+}
+function killWorker() {
+  if (W) W.terminate();
+  W = false;
+  const list = [...jobs.values()]; jobs.clear();
+  list.forEach((j) => { clearTimeout(j.timer); j.fallback(); });
+}
+
+export function fingerprint(file, patches = [], onProgress) {
+  const w = hashWorker();
+  if (!w) return hashLocal(file, patches, onProgress);
+  return new Promise((resolve, reject) => {
+    const id = ++wid;
+    const j = { resolve, reject, onProgress, started: false };
+    j.fallback = () => hashLocal(file, patches, onProgress).then(resolve, reject);
+    j.timer = setTimeout(killWorker, 8000); // no answer at all: the worker never came up
+    jobs.set(id, j);
+    try { w.postMessage({ id, file, patches }); } catch { jobs.delete(id); clearTimeout(j.timer); j.fallback(); }
+  });
 }
 
 export async function sha256File(file, onProgress) {

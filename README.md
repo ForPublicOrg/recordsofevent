@@ -18,7 +18,9 @@ Anyone can start an archive for an event, share its QR code, and everyone who wa
 | Postgres | Events, records, reports (Neon, Supabase or any Postgres). The schema is created automatically on first run |
 | S3-compatible storage | The video files (Cloudflare R2 recommended — viewers watching video costs nothing) |
 
-Uploads go straight from the browser to storage in 8 MB parts using short-lived signed URLs, so large files never pass through Vercel. Uploads resume by themselves after a network drop.
+Uploads go straight from the browser to storage in 8 MB parts using short-lived signed URLs, so large files never pass through Vercel. Uploads resume by themselves after a network drop. Playback works the same way: the API hands out signed links, and posters and videos load straight from storage.
+
+`npm run build` writes `dist/`: the app is split into content-hashed files under `dist/assets/` (cached forever by browsers; the upload, moderation and verify code loads only when needed), and `dist/index.html` plus `server/template.js` are rewritten to point at them. Fingerprinting runs in a Web Worker built to `dist/hash-worker.js`.
 
 ## Deploy (about 20 minutes)
 
@@ -70,6 +72,7 @@ git push -u origin main
    All options are listed in [`.env.example`](.env.example).
 4. **Deployments** → **Redeploy** so the variables take effect.
 5. **Settings** → **Domains** → add `recordsofevent.com` and follow the DNS instructions.
+6. Optional but worth it: **Settings** → **Functions** → **Function Region** — pick the region closest to your Neon database (shown in the Neon console). Every page and API call talks to the database, so a function on another continent adds that distance to each request.
 
 ### 4. First run
 1. Open `https://recordsofevent.com/new` and create the first event.

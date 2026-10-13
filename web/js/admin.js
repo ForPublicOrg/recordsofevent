@@ -1,5 +1,5 @@
 // Moderator area: sign-in, review queue, events, reports, hidden, recently published, log, record search.
-import { $, $$, ic, esc, api, toast, copy, dur, bytes, fmtTime, localMin, fmtDate, tzName, LABEL, ago, config } from './util.js';
+import { $, $$, ic, esc, api, toast, copy, dur, bytes, fmtTime, localMin, fmtDate, tzName, LABEL, ago, config, setModerator } from './util.js';
 
 const TABS = [
   ['clips', 'Review queue', 'film'], ['events', 'Events', 'calendar'], ['reports', 'Reports', 'flag'],
@@ -43,7 +43,8 @@ export async function renderAdmin(root) {
   if (keyFn) document.removeEventListener('keydown', keyFn);
   keyFn = onKey; document.addEventListener('keydown', keyFn);
   root.innerHTML = '<div class="adm wrap"><div class="empty">Loading…</div></div>';
-  try { s.who = (await api('/api/admin/me')).name; } catch (e) {
+  try { s.who = (await api('/api/admin/me')).name; setModerator(true); } catch (e) {
+    if (e.status === 401) setModerator(false);
     if (S !== s) return;
     if (e.status === 401) return login();
     root.innerHTML = `<div class="adm wrap"><div class="empty"><b>Can't open moderation</b><p>${esc(e.message)}</p><button class="btn btn-ghost" type="button" data-act="restart">Try again</button></div></div>`;
@@ -261,8 +262,10 @@ function eventRow(ev) {
 
 async function evAct(row, action) {
   const ev = S.items.find((x) => x.id === Number(row.dataset.eid));
-  if (!ev) return;
-  try { await api('/api/admin/event', { body: { id: ev.id, action } }); } catch (e) { return fail(e); }
+  if (!ev || row.classList.contains('adm-busy')) return;
+  row.classList.add('adm-busy');
+  try { await api('/api/admin/event', { body: { id: ev.id, action } }); } catch (e) { row.classList.remove('adm-busy'); return fail(e); }
+  if (!row.isConnected) return;
   if (ev.status === 'pending' && S.counts.events) S.counts.events--;
   ev.status = action === 'hide' ? 'hidden' : 'published';
   paintCounts();
@@ -380,6 +383,7 @@ async function onSubmit(e) {
     btn.disabled = true; err.textContent = '';
     try {
       S.who = (await api('/api/admin/login', { body: { password: fd.get('password'), name: String(fd.get('who') || '').trim() } })).name;
+      setModerator(true);
       shell(); load('clips');
     } catch (x) { err.textContent = x.message; btn.disabled = false; f.elements.password.select(); }
   }
@@ -403,7 +407,7 @@ function onClick(e) {
   switch (act) {
     case 'restart': renderAdmin(S.root); break;
     case 'retry': load(S.tab); break;
-    case 'logout': api('/api/admin/logout', { method: 'POST' }).catch(() => {}).then(() => login()); break;
+    case 'logout': t.disabled = true; api('/api/admin/logout', { method: 'POST' }).catch(() => {}).then(() => { setModerator(false); login(); }); break;
     case 'sens': toggleSens(card); break;
     case 'approve': case 'unhide': case 'update': clipAct(card, act); break;
     case 'ask-reject': case 'ask-hide': case 'ask-delete': ask(card, act.slice(4)); break;

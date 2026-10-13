@@ -56,7 +56,7 @@ async function call(method, key, query, body) {
   return { status: r.status, text, headers: r.headers };
 }
 
-const localUrl = (key, q = {}) => `/__storage/${key}?${new URLSearchParams(q)}`;
+const localUrl = (key, q = {}) => { const s = String(new URLSearchParams(q)); return `/__storage/${key}${s ? '?' + s : ''}`; };
 const localPath = (key) => {
   const p = path.resolve(LOCAL_DIR, key);
   if (!p.startsWith(LOCAL_DIR)) throw new Error('bad key');

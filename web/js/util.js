@@ -123,16 +123,50 @@ export const LABEL = {
 export const badge = (s) => `<span class="badge ${s}" title="${esc((LABEL[s] || LABEL.unverified)[2])}">${ic((LABEL[s] || LABEL.unverified)[1], 13, s === 'verified' ? 3 : 2.4)}${(LABEL[s] || LABEL.unverified)[0]}</span>`;
 export const sIco = (s) => (s === 'unverified' || !LABEL[s] ? '' : `<span class="sico ${s}" title="${LABEL[s][0]}">${ic(LABEL[s][1], 13, 2.6)}</span>`);
 
-/* ---------- API ---------- */
+/* ---------- media URLs (signed storage URLs from the API, /m/ routes as fallback) ---------- */
+export const posterOf = (c) => c.pu || '/m/p/' + c.r;
+export const videoOf = (c) => c.vu || '/m/v/' + c.r;
+export const downloadOf = (c) => c.du || '/m/d/' + c.r;
+export const coverOf = (e) => e.coverUrl || (e.cover ? '/m/p/' + e.cover : null);
+
+/* ---------- API ----------
+   Times out (10 s GET, 30 s otherwise; opts.timeout overrides) and retries a GET once on a
+   network error, timeout or 5xx. Errors carry .status when the server answered. */
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+async function apiOnce(path, init, ms) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl && setTimeout(() => ctl.abort(), ms);
+  let r;
+  try { r = await fetch(path, ctl ? { ...init, signal: ctl.signal } : init); }
+  catch {
+    const e = new Error(ctl && ctl.signal.aborted ? 'The server is taking too long to answer. Check your connection and try again.' : 'No connection. Check your internet and try again.');
+    e.retry = true; throw e;
+  } finally { clearTimeout(timer); }
+  let data = null;
+  try { data = await r.json(); } catch { /* not JSON */ }
+  if (!r.ok) { const e = new Error((data && data.error) || `Request failed (${r.status})`); e.status = r.status; e.retry = r.status >= 500; throw e; }
+  return data;
+}
+// Moderators get uncached public data: the CDN caches /api/home and /api/events/* per URL only,
+// so a signed-in moderator would otherwise see the public copy (e.g. a hidden event as "removed").
+let moderator = false;
+try { moderator = localStorage.getItem('roe.mod') === '1'; } catch { /* ignore */ }
+export function setModerator(on) {
+  moderator = !!on;
+  try { on ? localStorage.setItem('roe.mod', '1') : localStorage.removeItem('roe.mod'); } catch { /* ignore */ }
+}
 export async function api(path, opts = {}) {
   const init = { method: opts.method || (opts.body ? 'POST' : 'GET'), headers: {}, credentials: 'same-origin' };
   if (opts.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(opts.body); }
-  let r;
-  try { r = await fetch(path, init); } catch { throw new Error('No connection. Check your internet and try again.'); }
-  let data = null;
-  try { data = await r.json(); } catch { /* not JSON */ }
-  if (!r.ok) { const e = new Error((data && data.error) || `Request failed (${r.status})`); e.status = r.status; throw e; }
-  return data;
+  const get = init.method === 'GET';
+  if (get) init.cache = 'no-cache'; // the app keeps its own cache; never let the browser hand back stale JSON
+  if (get && (opts.fresh || moderator) && /^\/api\/(home|events\/)/.test(path)) path += (path.includes('?') ? '&' : '?') + 'fresh=1';
+  const ms = opts.timeout || (get ? 10000 : 30000);
+  try { return await apiOnce(path, init, ms); } catch (e) {
+    if (!get || !e.retry || opts.retry === false) throw e;
+    await sleep(400);
+    return apiOnce(path, init, ms);
+  }
 }
 
 /* ---------- UI bits ---------- */
