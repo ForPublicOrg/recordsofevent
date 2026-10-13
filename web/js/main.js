@@ -334,8 +334,7 @@ function spark(arr, color) {
 }
 function eventCard(e) {
   return `<a class="ecard" href="/e/${e.slug}" style="--c:${e.color}">
-    <div class="cover"><img src="${evImg(e)}" alt="" loading="lazy" decoding="async"><div class="date">${shortDate(e.date)}</div>
-      <div class="status">${e.live ? '<span class="live">Live</span>' : ''}</div></div>
+    <div class="cover"><img src="${evImg(e)}" alt="" loading="lazy" decoding="async"><div class="date">${shortDate(e.date)}</div></div>
     <div class="body">
       <h3>${esc(e.title)}</h3>
       <div class="where">${ic('pin', 15)}${esc(e.city)}${e.country ? ', ' + esc(e.country) : ''}${e.nplaces > 1 ? ` · ${e.nplaces} places` : ''}</div>
@@ -382,7 +381,7 @@ function drawHome(h, quiet) {
     <section class="hero" style="--accent:${f.color}">
       ${media}
       <div class="hero-body">
-        <div class="hero-top">${f.live ? '<span class="live">Live</span>' : `<span class="chip glass">${ic('calendar', 15)}${fmtDate(f.date)}</span>`}<span class="chip glass">${ic('pin', 15)}${esc(f.city)}${f.nplaces > 1 ? ` + ${plural(f.nplaces - 1, 'place')}` : ''}</span></div>
+        <div class="hero-top"><span class="chip glass">${ic('calendar', 15)}${fmtDate(f.date)}</span><span class="chip glass">${ic('pin', 15)}${esc(f.city)}${f.nplaces > 1 ? ` + ${plural(f.nplaces - 1, 'place')}` : ''}</span></div>
         <div class="bigdate">${bigDate(f.date)}</div>
         <h1>${esc(f.title)}</h1>
         <div class="meta">
@@ -509,7 +508,7 @@ function drawEvent(data, slug, view, quiet) {
         ${ev.status === 'pending' ? `<div class="banner">${ic('clock', 16)}<span><b>Not listed yet.</b> This page works and uploads are open — it appears in search after a quick review.</span></div>` : ''}
         <div class="row">
           <div>
-            <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">${ev.live ? '<span class="live">Live</span>' : ''}<span class="chip">${esc(ev.kind)}</span>${ev.pending ? `<span class="chip">${ic('clock', 14)}${plural(ev.pending, 'video')} in review</span>` : ''}</div>
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap"><span class="chip">${esc(ev.kind)}</span>${ev.pending ? `<span class="chip">${ic('clock', 14)}${plural(ev.pending, 'video')} in review</span>` : ''}</div>
             <div class="bigdate" style="--accent:${ev.color}">${bigDate(ev.date)}</div>
             <h1>${esc(ev.title)}</h1>
             <div class="facts">
@@ -779,7 +778,7 @@ function aboutHtml() {
     <div class="card">
       <h4>About this record</h4>
       <dl class="kv" style="margin-top:12px">
-        <dt>Date</dt><dd>${fmtDate(ev.date)}${ev.live ? ' · <span style="color:var(--rec);font-weight:700">Live</span>' : ''}</dd>
+        <dt>Date</dt><dd>${fmtDate(ev.date)}</dd>
         <dt>Place</dt><dd>${esc(ev.city)}${ev.country ? ', ' + esc(ev.country) : ''}</dd>
         <dt>Time zone</dt><dd>${esc(ev.tz)} · ${tzName(ev.tz)}</dd>
         ${ev.aliases.length ? `<dt>Also called</dt><dd>${ev.aliases.map(esc).join(', ')}</dd>` : ''}
@@ -854,7 +853,7 @@ function drawNew() {
     const e = N.created; const url = `${origin()}/u/${e.code}`;
     m.style.setProperty('--accent', e.color);
     m.innerHTML = `<div class="mhead"><h2>Your event is ready</h2><button class="iconbtn" data-action="close" aria-label="Close">${ic('x', 20)}</button></div>
-      <div class="mbody"><div class="created"><div class="qrbox" id="newqr"></div><div><span class="live" style="background:${e.color}">New</span><h3 style="margin:10px 0 4px;font:650 22px var(--font-display)">${esc(e.title)}</h3><p style="color:var(--muted);margin:0">${fmtDate(e.date)} · ${esc(e.city)}</p><div class="code mono">${e.code}</div></div></div>
+      <div class="mbody"><div class="created"><div class="qrbox" id="newqr"></div><div><span class="newtag" style="background:${e.color}">New</span><h3 style="margin:10px 0 4px;font:650 22px var(--font-display)">${esc(e.title)}</h3><p style="color:var(--muted);margin:0">${fmtDate(e.date)} · ${esc(e.city)}</p><div class="code mono">${e.code}</div></div></div>
       <p style="color:var(--muted);margin:16px 0">Share the QR code or link — anyone who opens it can add footage straight away.${e.status === 'pending' ? ' It shows up in search after a quick review.' : ''}</p>
       <div class="newacts"><a class="btn btn-accent" href="/upload/${e.slug}" style="grid-column:1/-1">${ic('upload', 17)}Add the first clips</a><a class="btn btn-ghost" href="https://wa.me/?text=${encodeURIComponent(`${e.title} — add your footage: ${url}`)}" target="_blank" rel="noopener">${ic('share', 16)}WhatsApp</a><button class="btn btn-ghost" data-action="copytext" data-text="${esc(url)}">${ic('copy', 16)}Copy link</button><a class="btn btn-ghost" href="/poster/${e.slug}">${ic('download', 16)}Print poster</a><a class="btn btn-ghost" href="/e/${e.slug}">Open event ${ic('arrow', 16)}</a></div></div>`;
     qr($('#newqr'), url);
@@ -939,7 +938,7 @@ function openSearch() {
 }
 function searchHints() {
   const evs = (cache.home && cache.home.events.slice(0, 5)) || [];
-  return `${evs.length ? `<h6>Recent events</h6>${evs.map((e) => `<a class="sres" href="/e/${e.slug}"><img src="${evImg(e)}" alt="" decoding="async"><div><b>${esc(e.title)}</b><span>${fmtDate(e.date)} · ${esc(e.city)}</span></div>${e.live ? '<span class="live">Live</span>' : ''}</a>`).join('')}` : ''}
+  return `${evs.length ? `<h6>Recent events</h6>${evs.map((e) => `<a class="sres" href="/e/${e.slug}"><img src="${evImg(e)}" alt="" decoding="async"><div><b>${esc(e.title)}</b><span>${fmtDate(e.date)} · ${esc(e.city)}</span></div></a>`).join('')}` : ''}
     <h6>You can search by</h6><div class="shints"><span class="chip">Event name</span><span class="chip">City or place</span><span class="chip mono">10102026</span><span class="chip mono">ROE-261010-0042</span></div>`;
 }
 function hl(text, q) {
@@ -951,7 +950,7 @@ function hl(text, q) {
 function searchResults(q, r) {
   if (r.error) return `<div class="empty" style="padding:30px"><b>Search isn’t available</b>${esc(r.error)}</div>`;
   let out = '';
-  if (r.events.length) out += '<h6>Events</h6>' + r.events.map((e) => `<a class="sres" href="/e/${e.slug}"><img src="${evImg(e)}" alt="" decoding="async"><div><b>${hl(e.title, q)}</b><span>${fmtDate(e.date)} · ${hl(e.city, q)}${e.country ? ', ' + esc(e.country) : ''} · ${plural(e.n, 'clip')}</span></div>${e.live ? '<span class="live">Live</span>' : ''}</a>`).join('');
+  if (r.events.length) out += '<h6>Events</h6>' + r.events.map((e) => `<a class="sres" href="/e/${e.slug}"><img src="${evImg(e)}" alt="" decoding="async"><div><b>${hl(e.title, q)}</b><span>${fmtDate(e.date)} · ${hl(e.city, q)}${e.country ? ', ' + esc(e.country) : ''} · ${plural(e.n, 'clip')}</span></div></a>`).join('');
   if (r.places.length) out += '<h6>Places</h6>' + r.places.map((p) => `<a class="sres" href="/e/${p.slug}/places" data-setplace="${p.id}"><span class="ic-tile" style="color:${p.color}">${ic('pin', 20)}</span><div><b>${hl(p.name, q)}</b><span>${esc(p.title)} · ${plural(p.n, 'clip')}</span></div></a>`).join('');
   if (r.records.length) out += '<h6>Records</h6>' + r.records.map((c) => `<a class="sres" href="/r/${c.r}" data-slug="${esc(c.slug)}">${c.img ? `<img src="${posterOf(c)}" alt="" decoding="async">` : `<span class="ic-tile">${ic('film', 20)}</span>`}<div><b class="mono">${hl(c.r, q)}</b><span>${fmtTime(localMin(c.t, c.tz))} · ${esc(c.title)}</span></div>${badge(c.s)}</a>`).join('');
   return out || `<div class="empty" style="padding:30px"><b>No results</b>Nothing matches “${esc(q)}”.<a class="btn btn-ghost" href="/new" style="margin-top:12px">${ic('plus', 16)}Start an archive for it</a></div>`;

@@ -84,7 +84,7 @@ function draw() {
 }
 function patchFoot() { const f = $('#upmodal .mfoot'); if (f && U) f.innerHTML = STEPS[U.step]()[1]; }
 const coverOf = (e) => e.coverUrl || `/m/p/${e.cover}`;
-const evRow = (e, on) => `<button class="pickrow ${on ? 'on' : ''}" data-pick="${e.slug}" style="--accent:${e.color}">${e.cover ? `<img src="${esc(coverOf(e))}" alt="" loading="lazy" decoding="async">` : `<span class="ic-tile" style="color:${e.color}">${ic('calendar', 22)}</span>`}<div><b>${esc(e.title)}</b><span>${fmtDate(e.date)} · ${esc(e.city)}${e.live ? ' · <span style="color:var(--rec);font-weight:700">Live</span>' : ''}</span></div><span class="radio"></span></button>`;
+const evRow = (e, on) => `<button class="pickrow ${on ? 'on' : ''}" data-pick="${e.slug}" style="--accent:${e.color}">${e.cover ? `<img src="${esc(coverOf(e))}" alt="" loading="lazy" decoding="async">` : `<span class="ic-tile" style="color:${e.color}">${ic('calendar', 22)}</span>`}<div><b>${esc(e.title)}</b><span>${fmtDate(e.date)} · ${esc(e.city)}</span></div><span class="radio"></span></button>`;
 
 function pickList() {
   const list = U.events;

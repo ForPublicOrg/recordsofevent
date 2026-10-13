@@ -200,8 +200,8 @@ async function apiHome() {
       where c.status = 'published' and e.status = 'published' and not c.sensitive order by c.published_at desc limit 6`),
   ]);
   const ids = rows.map((e) => e.id);
-  const order = rows.map((e) => ({ e, live: isLive(e), n: e.n ?? 0 }))
-    .sort((a, b) => (b.live - a.live) || (b.live && a.live ? b.n - a.n : 0));
+  // By the date of the event, newest first (the query's order); recent uploads don't move an event up.
+  const order = rows.map((e) => ({ e, n: e.n ?? 0 }));
   const top = (order.find((o) => o.n > 0) || order[0])?.e || null;
   const [covers, sparks, latestRows, places] = await Promise.all([
     coversFor(ids, 4), sparksFor(ids),
