@@ -108,7 +108,9 @@ function requireAdmin(req) {
   }
   return who;
 }
-const log = (actor, action, target, detail = null) => q('insert into modlog (actor, action, target, detail) values ($1, $2, $3, $4)', [actor, action, target, detail ? JSON.stringify(detail) : null]);
+// jsonb values are passed as JSON text and cast in SQL (`$n::text::jsonb`): the production driver
+// would otherwise JSON-encode the string a second time and store a jsonb string.
+const log = (actor, action, target, detail = null) => q('insert into modlog (actor, action, target, detail) values ($1, $2, $3, $4::text::jsonb)', [actor, action, target, detail ? JSON.stringify(detail) : null]);
 
 /* ---------- serializers ---------- */
 // One pass over each event's clips (index clips_event) instead of a subquery per figure.
@@ -342,47 +344,64 @@ async function apiLinkProbe(req) {
   };
 }
 
-// Copies the next parts of a linked video into storage, for about 20 s per request. Progress is
-// saved after every part with a compare-and-set, so a retried or doubled request never skips or
-// double-counts a part.
-const PULL_BUDGET = 20000;
+// Copies the next parts of a linked video into storage, for up to ~15 s of new work per request.
+// One request per video copies at a time (a short lease in link_job, taken with a compare-and-set
+// on database time); others get `busy` back. Progress is saved after every part, so a request that
+// dies mid-way loses at most the part it was on.
+const PULL_START_BY = 15000; // no new part is started after this
+const PULL_FETCH_BY = 32000; // a part still downloading after this is given up (and redone next time)
+const LEASE_MS = 58000;
+const NOW_MS = 'extract(epoch from clock_timestamp()) * 1000';
 async function apiUploadPull(req) {
+  const t0 = Date.now();
   const b = await readBody(req);
-  const c = await batchFor(b.token, b.clip);
-  const job = c.link_job;
-  need(job, 'This upload isn’t a link.', 409);
-  const total = Math.ceil(job.t.z / IMPORT_PART);
-  if (c.status !== 'uploading' || job.n > total) return { done: total, of: total };
+  const [c, hits] = await Promise.all([batchFor(b.token, b.clip), hit(req, 'pull')]);
+  tooMany(hits, 3000);
+  need(c.link_job, 'This upload isn’t a link.', 409);
+  const total = Math.ceil(c.link_job.t.z / IMPORT_PART);
+  if (c.status !== 'uploading' || c.link_job.n > total) return { done: total, of: total };
+  const got = await q1(`update clips set link_job = jsonb_set(link_job, '{l}', to_jsonb((${NOW_MS})::bigint + ${LEASE_MS}))
+    where id = $1 and status = 'uploading' and coalesce((link_job->>'l')::bigint, 0) < ${NOW_MS} returning link_job`, [c.id]);
+  if (!got) return { done: c.link_job.n - 1, of: total, busy: true };
+  const job = got.link_job;
+  const lease = Number(job.l);
+  const release = () => q(`update clips set link_job = link_job - 'l' where id = $1 and (link_job->>'l')::bigint = $2`, [c.id, lease]).catch(() => {});
+  if (job.n > total) { await release(); return { done: total, of: total }; }
   const patches = unpackPatches(job.t.p);
   const [orig, stored] = await Promise.all([hasher(job.h), job.g ? hasher(job.g) : null]);
-  const t0 = Date.now();
-  const ahead = (n) => { const p = fetchPart(job.t, n); p.catch(() => {}); return p; };
+  const ahead = (n) => { const p = fetchPart(job.t, n, t0 + PULL_FETCH_BY); p.catch(() => {}); return p; };
   let pending = ahead(job.n);
-  while (job.n <= total) {
-    const n = job.n;
-    const buf = await pending;
-    pending = n < total && Date.now() - t0 < PULL_BUDGET ? ahead(n + 1) : null; // fetch the next part while this one is stored
-    orig.update(buf);
-    const out = scrub(buf, (n - 1) * IMPORT_PART, patches);
-    if (stored) stored.update(out);
-    const etag = await store.putPart(c.storage_key, c.upload_id, n, out);
-    const nextJob = { ...job, n: n + 1, e: [...job.e, etag], h: saveHash(orig), g: stored ? saveHash(stored) : null };
-    const saved = await q1(`update clips set link_job = $1 where id = $2 and status = 'uploading' and (link_job->>'n')::int = $3 returning id`, [JSON.stringify(nextJob), c.id, n]);
-    if (!saved) { // another request for this clip got there first: report where it is
-      const cur = await q1(`select (link_job->>'n')::int as n from clips where id = $1`, [c.id]);
-      return { done: cur && cur.n ? cur.n - 1 : total, of: total };
+  try {
+    while (job.n <= total) {
+      const n = job.n;
+      const buf = await pending;
+      pending = n < total && Date.now() - t0 < PULL_START_BY ? ahead(n + 1) : null; // fetch the next part while this one is stored
+      orig.update(buf);
+      const out = scrub(buf, (n - 1) * IMPORT_PART, patches);
+      if (stored) stored.update(out);
+      const etag = await store.putPart(c.storage_key, c.upload_id, n, out);
+      const nextJob = { ...job, n: n + 1, e: [...job.e, etag], h: saveHash(orig), g: stored ? saveHash(stored) : null };
+      const saved = await q1(`update clips set link_job = $1::text::jsonb where id = $2 and status = 'uploading' and (link_job->>'n')::int = $3 and (link_job->>'l')::bigint = $4 returning id`,
+        [JSON.stringify(nextJob), c.id, n, lease]);
+      if (!saved) { // the lease ran out and another request took over: report where it is
+        const cur = await q1(`select (link_job->>'n')::int as n from clips where id = $1`, [c.id]);
+        return { done: cur && cur.n ? cur.n - 1 : total, of: total };
+      }
+      Object.assign(job, nextJob);
+      if (!pending) break;
     }
-    Object.assign(job, nextJob);
-    if (!pending) break;
-  }
+  } finally { await release(); }
   return { done: job.n - 1, of: total };
 }
 
 // A preview image made in the browser from the stored copy, for linked videos that came without one.
+// Only while the video still has none and hasn't been reviewed (or never will be: post-moderation),
+// and within the life of the upload's preview URL.
 async function apiUploadPoster(req) {
   const b = await readBody(req);
   const c = await batchFor(b.token, b.clip);
-  need(['pending', 'published'].includes(c.status), 'This video is no longer on record.', 409);
+  need(c.status === 'pending' || (c.status === 'published' && cfg.moderation === 'post'), 'This video can’t be changed now.', 409);
+  need(!c.has_poster && Date.now() - new Date(c.created_at).getTime() < 6 * 3600e3, 'This video already has a preview image.', 409);
   need((await store.size(c.poster_key)) > 0, 'The preview image did not arrive.', 422);
   await q(`update clips set has_poster = true, duration = coalesce(duration, $2), width = coalesce(width, $3), height = coalesce(height, $4) where id = $1`,
     [c.id, Number(b.duration) > 0 ? Number(b.duration) : null, Number(b.width) || null, Number(b.height) || null]);
@@ -442,7 +461,7 @@ async function apiUploadStart(req) {
     job = JSON.stringify({ t: link, n: 1, e: [], h: blank, g: link.p.length ? blank : null });
   }
   const clip = await q1(`insert into clips (event_id, batch_id, place_id, status, sensitive, note, name, captured_at, time_source, duration, width, height, size, mime, sha256, sha256_original, stripped, storage_key, poster_key, ip, upload_id, link_job)
-    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) returning id`,
+    values ($1, $2, $3, 'uploading', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::text::jsonb) returning id`,
   [e.id, batchId, placeId, !!b.sensitive, str(f.note, 500), name, captured.toISOString(), timeSource,
     Number(f.duration) > 0 ? Number(f.duration) : null, Number(f.width) || null, Number(f.height) || null, size, mime,
     link ? null : f.sha256, link ? null : f.sha256o, stripped, key, posterKey, ip, uploadId, job]);
@@ -708,7 +727,7 @@ async function adminEventAction(req, who) {
     const sources = (Array.isArray(f.sources) ? f.sources : []).slice(0, 12)
       .map((s) => ({ title: str(s.title, 80), url: str(s.url, 400) })).filter((s) => /^https?:\/\//.test(s.url));
     const fig = f.figures && str(f.figures.label, 80) ? { label: str(f.figures.label, 80), low: str(f.figures.low, 40), high: str(f.figures.high, 40), note: str(f.figures.note, 200) } : null;
-    await q(`update events set title = $1, kind = $2, summary = $3, aliases = $4, sources = $5, figures = $6, city = $7, country = $8, tz = $9, updated_at = now() where id = $10`, [
+    await q(`update events set title = $1, kind = $2, summary = $3, aliases = $4, sources = $5::text::jsonb, figures = $6::text::jsonb, city = $7, country = $8, tz = $9, updated_at = now() where id = $10`, [
       str(f.title, 140) || e.title, KINDS.includes(f.kind) ? f.kind : e.kind, str(f.summary, 3000),
       (Array.isArray(f.aliases) ? f.aliases : []).map((a) => str(a, 60)).filter(Boolean).slice(0, 12),
       JSON.stringify(sources), fig ? JSON.stringify(fig) : null, str(f.city, 80) || e.city, str(f.country, 80), validTz(f.tz) ? f.tz : e.tz, e.id]);

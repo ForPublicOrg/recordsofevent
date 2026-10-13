@@ -50,7 +50,7 @@ function presign(method, key, { query = {}, expires = 3600, at = new Date() } = 
 }
 
 async function call(method, key, query, body) {
-  const r = await fetch(presign(method, key, { query, expires: 300 }), { method, body });
+  const r = await fetch(presign(method, key, { query, expires: 300 }), { method, body, signal: AbortSignal.timeout(20000) });
   const text = await r.text();
   if (!r.ok && !(method === 'DELETE' && r.status === 404)) throw new Error(`Storage ${method} failed (${r.status}): ${text.slice(0, 200)}`);
   return { status: r.status, text, headers: r.headers };
@@ -95,7 +95,7 @@ export async function putPart(key, uploadId, n, body) {
       const etag = headers.get('etag');
       if (!etag) throw new Error('Storage did not return an ETag');
       return etag;
-    } catch (e) { if (attempt >= 2) throw e; }
+    } catch (e) { if (attempt >= 1) throw e; }
   }
 }
 

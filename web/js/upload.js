@@ -464,27 +464,33 @@ async function uploadOne(f) {
   f.record = done.record; f.status = done.status; f.phase = 'done'; f.pct = 100;
 }
 // A linked video: the server copies it in parts while this loop asks for the next ones.
+// "Try again" picks the same copy up where it stopped.
 async function copyOne(f) {
-  f.phase = 'up'; f.pct = 0; f.error = null; refreshFiles();
+  f.phase = 'up'; f.error = null; refreshFiles();
   await waitUntilReady();
-  const start = await api('/api/uploads/start', { body: {
-    event: U.ev.slug, token: U.token, place: U.place, sensitive: U.sensitive,
-    file: { ticket: f.ticket, captured: f.captured.toISOString(), ts: f.ts, duration: f.duration, width: f.width, height: f.height, note: f.note },
-  } });
-  if (start.duplicate) { f.phase = 'dupe'; f.record = start.duplicate; f.pct = 100; return; }
-  if (start.token) {
-    U.token = start.token; saveReceipt();
-    const n = $('#netnote'); if (U.step === 3 && n && !$('#upreceipt')) n.insertAdjacentHTML('afterend', receiptCard());
+  if (!f.clip || f.clipToken !== U.token) {
+    f.pct = 0;
+    const start = await api('/api/uploads/start', { body: {
+      event: U.ev.slug, token: U.token, place: U.place, sensitive: U.sensitive,
+      file: { ticket: f.ticket, captured: f.captured.toISOString(), ts: f.ts, duration: f.duration, width: f.width, height: f.height, note: f.note },
+    } });
+    if (start.token) {
+      U.token = start.token; saveReceipt();
+      const n = $('#netnote'); if (U.step === 3 && n && !$('#upreceipt')) n.insertAdjacentHTML('afterend', receiptCard());
+    }
+    f.clip = start.clip; f.clipToken = U.token; f.posterUrl = start.posterUrl;
   }
-  f.clip = start.clip;
-  for (let fails = 0; ;) {
+  for (let fails = 0, last = -1; ;) {
     await waitUntilReady();
     try {
       const r = await api('/api/uploads/pull', { body: { token: U.token, clip: f.clip }, timeout: 75000 });
       fails = 0; setNet(false);
       f.pct = Math.max(f.pct, Math.min(99.5, (r.done / r.of) * 100)); refreshFiles();
       if (r.done >= r.of) break;
+      if (r.done <= last) await sleep(2000); // another request is still copying it
+      last = r.done;
     } catch (e) {
+      if (e.status === 404) { f.clip = null; return copyOne(f); } // the unfinished copy was cleared away: start again
       if (e.status && e.status < 500 && e.status !== 408 && e.status !== 429) throw e; // the link itself failed
       if (++fails > 8) throw new Error(e.status ? e.message : 'The copy stopped. Check your connection and try again.');
       if (!e.status) setNet(true);
@@ -494,11 +500,15 @@ async function copyOne(f) {
   let done;
   for (let attempt = 0; ; attempt++) {
     try { done = await api('/api/uploads/complete', { body: { token: U.token, clip: f.clip }, timeout: 60000 }); break; }
-    catch (e) { if ((e.status && e.status < 500) || attempt > 5) throw e; setNet(!e.status); await sleep(2000 * (attempt + 1)); await waitUntilReady(); }
+    catch (e) {
+      if (e.status === 404 || e.status === 422) f.clip = null; // the server dropped this copy; a retry starts over
+      if ((e.status && e.status < 500) || attempt > 5) throw e;
+      setNet(!e.status); await sleep(2000 * (attempt + 1)); await waitUntilReady();
+    }
   }
   if (done.duplicate) { f.phase = 'dupe'; f.record = done.duplicate; f.pct = 100; return; }
   f.record = done.record; f.status = done.status; f.shao = done.sha256; f.phase = 'done'; f.pct = 100;
-  if (!done.poster && done.vu) posterFromCopy(f, U.token, start.posterUrl, done.vu);
+  if (!done.poster && done.vu && f.posterUrl) posterFromCopy(f, U.token, f.posterUrl, done.vu);
 }
 // Best effort, in the background: a frame of the stored copy becomes its preview image.
 async function posterFromCopy(f, token, putUrl, src) {

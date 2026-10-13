@@ -1,5 +1,5 @@
 // Idempotent schema. Bump SCHEMA_VERSION after changing it; it runs once on the next cold start.
-export const SCHEMA_VERSION = '3';
+export const SCHEMA_VERSION = '4';
 
 export const SCHEMA = `
 create table if not exists meta (k text primary key, v text not null);
@@ -111,4 +111,10 @@ create table if not exists modlog (
 
 -- Copy progress for a video added by link (source, next part, part ETags, saved hash states).
 alter table clips add column if not exists link_job jsonb;
+
+-- Repair: an earlier version stored some jsonb values as JSON strings (double-encoded).
+update events set sources = (sources #>> '{}')::jsonb where jsonb_typeof(sources) = 'string';
+update events set figures = (figures #>> '{}')::jsonb where jsonb_typeof(figures) = 'string';
+update modlog set detail = (detail #>> '{}')::jsonb where jsonb_typeof(detail) = 'string';
+update clips set link_job = (link_job #>> '{}')::jsonb where jsonb_typeof(link_job) = 'string';
 `;

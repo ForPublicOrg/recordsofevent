@@ -14,6 +14,8 @@ import { inspect } from '../web/js/mp4.js';
 export const IMPORT_PART = 16 * 1024 * 1024;
 const HEAD = 256 * 1024; // first read: enough to recognise the file and usually its first boxes
 const WINDOW = 512 * 1024; // small reads during inspection fetch this much around them
+const INSPECT_BYTES = 80 * 1024 * 1024; // most a link check reads (memory) …
+const INSPECT_MS = 35000; // … and for how long
 const UA = 'Mozilla/5.0 (compatible; RecordsOfEvent/1.0; video import)';
 
 const linkErr = (message, status = 422) => Object.assign(new Error(message), { status, expose: true });
@@ -160,24 +162,27 @@ const totalOf = (res) => (res.statusCode === 206
   : Number(res.headers['content-length']));
 
 // A read-only "file" over the link for mp4.js: small reads are served from cached windows.
-function remote(url, size, head) {
+// Bounded in bytes and time; `failed` tells a read problem apart from a damaged file.
+function remote(url, size, head, until) {
   const cache = [{ from: 0, buf: head }];
-  let reads = 0;
+  let reads = 0, fetched = 0;
+  const r = { size, failed: false };
   const read = async (a, b) => {
     for (const c of cache) if (a >= c.from && b <= c.from + c.buf.length) return c.buf.subarray(a - c.from, b - c.from);
-    if (++reads > 24) throw new Error('too many reads');
     const to = Math.min(size, Math.max(b, a + WINDOW));
-    const res = await get(url, [a, to - 1]);
-    if (res.statusCode !== 206) { res.resume(); throw new Error('range refused'); }
-    const buf = await body(res, to - a, 30000);
-    if (buf.length !== to - a) throw new Error('short read');
-    cache.push({ from: a, buf });
-    return buf.subarray(0, b - a);
+    fetched += to - a;
+    if (++reads > 24 || fetched > INSPECT_BYTES || Date.now() > until) { r.failed = true; throw new Error('read limit'); }
+    try {
+      const res = await get(url, [a, to - 1]);
+      if (res.statusCode !== 206) { res.resume(); throw new Error('range refused'); }
+      const buf = await body(res, to - a, Math.max(1000, until - Date.now()));
+      if (buf.length !== to - a) throw new Error('short read');
+      if (buf.length <= WINDOW) cache.push({ from: a, buf }); // big boxes are read once; don't keep them
+      return buf.subarray(0, b - a);
+    } catch (e) { r.failed = true; throw e; }
   };
-  return {
-    size,
-    slice: (a, b) => ({ arrayBuffer: async () => { const u = await read(a, Math.min(size, b)); return u.buffer.slice(u.byteOffset, u.byteOffset + u.length); } }),
-  };
+  r.slice = (a, b) => ({ arrayBuffer: async () => { const u = await read(a, Math.min(size, b)); return u.buffer.slice(u.byteOffset, u.byteOffset + u.length); } });
+  return r;
 }
 
 async function driveThumb(id, width) {
@@ -190,6 +195,7 @@ async function driveThumb(id, width) {
 
 /* ---------- checking a link before upload ---------- */
 export async function probeLink(raw, maxBytes) {
+  const until = Date.now() + INSPECT_MS;
   const src = resolveLink(raw);
   const res = await get(src.url, [0, HEAD - 1]);
   const status = res.statusCode;
@@ -200,7 +206,7 @@ export async function probeLink(raw, maxBytes) {
   const size = totalOf(res);
   const ranged = status === 206;
   if (!ranged && size > IMPORT_PART) { res.destroy(); throw linkErr('That website doesn’t allow downloading in pieces, so large videos can’t be copied from it. Download the video and add the file instead.'); }
-  const head = await body(res, ranged ? Math.min(HEAD, size || HEAD) : IMPORT_PART, 30000, true);
+  const head = await body(res, ranged ? Math.min(HEAD, size || HEAD) : IMPORT_PART, 20000, true);
   if (/^text\/|html|json|xml/.test(type) || looksHtml(head)) throw linkErr(refused(src, status));
   if (!(size > 0)) throw linkErr('That link doesn’t say how big the video is, so it can’t be copied.');
   if (!ranged && head.length !== size) throw transient('The download from the link was interrupted.');
@@ -208,13 +214,16 @@ export async function probeLink(raw, maxBytes) {
   if (!sig && !type.startsWith('video/')) throw linkErr('That link doesn’t lead to a video file.');
   if (size > maxBytes) throw linkErr(`That video is ${Math.round(size / 1024 ** 2)} MB. Videos can be up to ${Math.round(maxBytes / 1024 ** 3)} GB.`, 413);
   const ext = sig ? sig.ext : (type.split('/')[1] || 'mp4').replace(/[^a-z0-9]/g, '').slice(0, 4) || 'mp4';
+  const file = remote(res.finalUrl, size, head, until);
   const [meta, thumb] = await Promise.all([
-    inspect(remote(res.finalUrl, size, head)).catch(() => ({ warning: 'We couldn’t check this video for hidden location data.' })),
+    inspect(file).catch(() => ({})),
     src.kind === 'drive' ? driveThumb(src.id, 176) : null,
   ]);
+  if (file.failed) meta.warning = 'We couldn’t fully check this video for hidden location data.';
+  const mime = sig ? sig.mime : /^video\/[\w.+-]{1,40}$/.test(type.split(';')[0].trim()) ? type.split(';')[0].trim() : 'video/mp4';
   return {
     src, ranged, size, ext,
-    mime: sig ? sig.mime : type.split(';')[0],
+    mime,
     name: fileName(res.headers['content-disposition'], res.finalUrl, ext),
     modified: Date.parse(res.headers['last-modified'] || '') || null,
     captured: meta.captured || null, duration: meta.duration || null, width: meta.width || null, height: meta.height || null,
@@ -228,7 +237,7 @@ export const packPatches = (list) => list.map((p) => [p.offset, zlib.deflateRawS
 export const unpackPatches = (list) => (list || []).map(([offset, b]) => ({ offset, bytes: zlib.inflateRawSync(Buffer.from(b, 'base64')) }));
 
 // Part n (1-based) of the source, exactly as many bytes as it should be.
-export async function fetchPart(t, n) {
+export async function fetchPart(t, n, until) {
   const from = (n - 1) * IMPORT_PART, to = Math.min(t.z, from + IMPORT_PART);
   const res = await get(t.s, t.r ? [from, to - 1] : null);
   const type = String(res.headers['content-type'] || '').toLowerCase();
@@ -237,7 +246,7 @@ export async function fetchPart(t, n) {
   const ok = t.r ? res.statusCode === 206 && totalOf(res) === t.z && new RegExp(`^bytes ${from}-${to - 1}/`).test(res.headers['content-range'] || '')
     : res.statusCode === 200 && totalOf(res) === t.z;
   if (!ok) { res.resume(); throw linkErr('The video at that link changed while it was being copied. Please add the link again.'); }
-  const buf = await body(res, to - from, 40000);
+  const buf = await body(res, to - from, Math.max(3000, until - Date.now()));
   if (buf.length !== to - from) throw transient('The download from the link was interrupted.');
   return buf;
 }
