@@ -311,7 +311,9 @@ async function apiCreateEvent(req) {
   need(city.length >= 2, 'Add the city or place.');
   need(country, 'Pick the country from the list.');
   need(/^\d{4}-\d{2}-\d{2}$/.test(date) && !isNaN(Date.parse(date)), 'Pick a date.');
-  need(date >= '1900-01-01' && date <= todayIn('Pacific/Kiritimati'), 'The date can’t be in the future.');
+  // Upcoming events are fine (the QR code can be shared before the day), up to a year ahead.
+  const today = todayIn('Pacific/Kiritimati');
+  need(date >= '1900-01-01' && date <= `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`, 'Pick a date within the next year.');
   await limit(req, 'event', 6);
   await limit(req, 'event-day', 20, 86400);
   const words = slugify(title).split('-').filter(Boolean).slice(0, 6).join('-');
@@ -682,18 +684,30 @@ const ADMIN_CLIP_SQL = `select c.*, p.name as place, e.slug, e.title, e.color, e
   (select count(*)::int from reports r where r.clip_id = c.id and r.status = 'open') as reports
   from clips c join events e on e.id = c.event_id left join places p on p.id = c.place_id`;
 
-async function adminQueue(url) {
-  const tab = url.searchParams.get('tab') || 'clips';
-  const counts = await q1(`select
+const queueCounts = () => q1(`select
     (select count(*)::int from clips where status = 'pending') as clips,
     (select count(*)::int from events where status = 'pending') as events,
     (select count(*)::int from reports where status = 'open') as reports,
     (select count(*)::int from clips where status = 'hidden') as hidden`);
+// What an event is found by in the moderator's searches.
+const EVENT_HAY = `(e.title || ' ' || e.city || ' ' || e.country || ' ' || e.date || ' ' || e.slug || ' ' || e.code || ' ' || array_to_string(e.aliases, ' '))`;
+const searchWords = (url) => str(url.searchParams.get('q'), 80).toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
+
+async function adminQueue(url) {
+  const tab = url.searchParams.get('tab') || 'clips';
+  const counts = await queueCounts();
   let items = [];
   if (tab === 'clips') items = (await q(`${ADMIN_CLIP_SQL} where c.status = 'pending' order by c.created_at limit 40`)).map(adminClip);
   else if (tab === 'hidden') items = (await q(`${ADMIN_CLIP_SQL} where c.status = 'hidden' order by c.created_at desc limit 40`)).map(adminClip);
   else if (tab === 'recent') items = (await q(`${ADMIN_CLIP_SQL} where c.status = 'published' order by c.published_at desc limit 40`)).map(adminClip);
-  else if (tab === 'events') items = (await q(`${EVENT_SQL} where e.status <> 'published' or e.updated_at > now() - interval '30 days' order by (e.status = 'pending') desc, e.created_at desc limit 60`)).map((e) => pubEvent(e, { id: e.id }));
+  else if (tab === 'events') {
+    // New and recently changed events, or any event when searched for.
+    const words = searchWords(url);
+    const rows = words.length
+      ? await q(`${EVENT_SQL} where ${EVENT_HAY} ilike all($1) order by e.date desc, e.id desc limit 60`, [words.map((w) => `%${w}%`)])
+      : await q(`${EVENT_SQL} where e.status <> 'published' or e.updated_at > now() - interval '30 days' order by (e.status = 'pending') desc, e.created_at desc limit 60`);
+    items = rows.map((e) => pubEvent(e, { id: e.id }));
+  }
   else if (tab === 'reports') {
     items = await q(`select r.*, c.record, c.status as clip_status, e.slug, e.title from reports r left join clips c on c.id = r.clip_id
       left join events e on e.id = r.event_id where r.status = 'open' order by r.created_at limit 60`);
@@ -710,10 +724,9 @@ async function adminFind(url) {
 
 // Events a clip can be moved to, in any status: by title, place, date, slug or code, newest first.
 async function adminEvents(url) {
-  const words = str(url.searchParams.get('q'), 80).toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
-  const hay = `(e.title || ' ' || e.city || ' ' || e.country || ' ' || e.date || ' ' || e.slug || ' ' || e.code || ' ' || array_to_string(e.aliases, ' '))`;
+  const words = searchWords(url);
   const rows = await q(`select e.id, e.slug, e.title, e.date, e.city, e.country, e.color, e.tz, e.lat, e.lon, e.status from events e
-    ${words.length ? `where ${hay} ilike all($1)` : ''} order by e.date desc, e.id desc limit 10`, words.length ? [words.map((w) => `%${w}%`)] : []);
+    ${words.length ? `where ${EVENT_HAY} ilike all($1)` : ''} order by e.date desc, e.id desc limit 10`, words.length ? [words.map((w) => `%${w}%`)] : []);
   return { events: rows };
 }
 
@@ -814,6 +827,7 @@ async function adminEventAction(req, who) {
   const b = await readBody(req);
   const e = await q1('select * from events where id = $1', [Number(b.id) || 0]);
   need(e, 'Event not found', 404);
+  let detail = null;
   if (b.action === 'approve' || b.action === 'unhide') await q(`update events set status = 'published', updated_at = now() where id = $1`, [e.id]);
   else if (b.action === 'hide') await q(`update events set status = 'hidden', updated_at = now() where id = $1`, [e.id]);
   else if (b.action === 'update') {
@@ -832,9 +846,30 @@ async function adminEventAction(req, who) {
       str(f.title, 140) || e.title, KINDS.includes(f.kind) ? f.kind : e.kind, str(f.summary, 3000),
       (Array.isArray(f.aliases) ? f.aliases : []).map((a) => str(a, 60)).filter(Boolean).slice(0, 12),
       JSON.stringify(sources), fig ? JSON.stringify(fig) : null, city, country, validTz(f.tz) ? f.tz : e.tz, la, lo, e.id]);
+  } else if (b.action === 'delete') {
+    need(str(b.confirm, 20).toUpperCase() === e.code, 'Type the event’s code to confirm.');
+    detail = { title: e.title, videos: await deleteEvent(e) };
   } else fail(400, 'Unknown action');
-  await log(who, 'event:' + b.action, e.slug);
-  return { ok: true };
+  await log(who, 'event:' + b.action, e.slug, detail);
+  return b.action === 'delete' ? { ok: true, counts: await queueCounts() } : { ok: true };
+}
+
+// Deletes an event for good: every video file and preview in storage, then the event with its
+// places, receipts and videos (record numbers are never reused). It is hidden first, so if storage
+// fails part-way it stays offline and the delete can be run again. Its open reports are closed.
+async function deleteEvent(e) {
+  await q(`update events set status = 'hidden', updated_at = now() where id = $1`, [e.id]);
+  const clips = await q('select status, storage_key, poster_key, upload_id from clips where event_id = $1', [e.id]);
+  const withFiles = clips.filter((c) => !['withdrawn', 'removed', 'rejected'].includes(c.status)); // the others' files are already gone
+  for (let i = 0; i < withFiles.length; i += 8) {
+    await Promise.all(withFiles.slice(i, i + 8).map(async (c) => {
+      if (c.upload_id) await store.abortMultipart(c.storage_key, c.upload_id);
+      await Promise.all([store.remove(c.storage_key), store.remove(c.poster_key)]);
+    }));
+  }
+  await q(`update reports set status = 'resolved', resolution = 'Event deleted', resolved_at = now() where event_id = $1 and status = 'open'`, [e.id]);
+  await q('delete from events where id = $1', [e.id]);
+  return clips.filter((c) => c.status !== 'uploading').length;
 }
 
 async function adminReportAction(req, who) {

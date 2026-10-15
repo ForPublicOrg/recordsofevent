@@ -843,7 +843,10 @@ function showDownloads(ev) {
 
 /* ---------- new event ---------- */
 const browserTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
-const todayLocal = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const todayLocal = () => ymd(new Date());
+// An archive can be started ahead of the day (up to a year), so its QR code can go out beforehand.
+const latestDate = () => { const d = new Date(); d.setFullYear(d.getFullYear() + 1); return ymd(d); };
 const validZone = (z) => { try { new Intl.DateTimeFormat('en', { timeZone: z }); return true; } catch { return false; } };
 // The place and country are picked from search results, never free text (see combo.js).
 const newReady = (N) => N.title.trim().length >= 6 && !!N.place && !!N.country && !!N.date;
@@ -878,7 +881,7 @@ function drawNew() {
       <div class="field"><label for="ne-title">What happened?</label><input id="ne-title" maxlength="140" value="${esc(N.title)}" placeholder="e.g. Teachers’ march to city hall" autocomplete="off"></div>
       <div id="dupebox">${dupeHtml(N.dupes)}</div>
       <div class="field"><label for="ne-city">City or place</label>${comboHtml('ne-city', { icon: 'pin', value: N.place ? N.place.name : '', placeholder: 'Search a city, town or square' })}</div>
-      <div class="row2"><div class="field"><label for="ne-country">Country</label>${comboHtml('ne-country', { icon: 'globe', chevron: true, value: N.country ? N.country.name : '', placeholder: 'Search countries' })}</div><div class="field"><label for="ne-date">When</label><input id="ne-date" type="date" value="${N.date}" max="${todayLocal()}"></div></div>
+      <div class="row2"><div class="field"><label for="ne-country">Country</label>${comboHtml('ne-country', { icon: 'globe', chevron: true, value: N.country ? N.country.name : '', placeholder: 'Search countries' })}</div><div class="field"><label for="ne-date">When</label><input id="ne-date" type="date" value="${N.date}" max="${latestDate()}"></div></div>
       <div class="field"><label for="ne-tz">Local time zone</label><select id="ne-tz">${tzs.map((z) => `<option ${z === N.tz ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select></div>
       <div class="field"><label>Type</label><div class="cats">${(config.kinds.length ? config.kinds : ['Protest', 'March', 'Rally', 'Other']).map((k) => `<button type="button" class="${N.kind === k ? 'on' : ''}" data-kind="${esc(k)}">${esc(k)}</button>`).join('')}</div></div>
       <p class="err" id="neerr" hidden></p>

@@ -45,7 +45,7 @@ const clipForms = new WeakMap(); // clip edit form → its state (see bindClipFo
 const CLIPS = new Map(); // clip id → its data as last drawn
 
 export async function renderAdmin(root) {
-  const s = S = { root, tab: 'clips', counts: {}, items: [], who: '', seq: 0 };
+  const s = S = { root, tab: 'clips', counts: {}, items: [], who: '', seq: 0, evq: '' };
   if (!bound.has(root)) { bound.add(root); root.addEventListener('click', onClick); root.addEventListener('submit', onSubmit); }
   if (keyFn) document.removeEventListener('keydown', keyFn);
   keyFn = onKey; document.addEventListener('keydown', keyFn);
@@ -97,8 +97,9 @@ async function load(tab, quiet) {
   const body = $('[data-body]', S.root);
   if (!body) return;
   if (!quiet) body.innerHTML = '<div class="empty">Loading…</div>';
+  const evq = tab === 'events' ? S.evq : '';
   let d;
-  try { d = await api('/api/admin/queue?tab=' + tab); } catch (e) {
+  try { d = await api('/api/admin/queue?tab=' + tab + (evq ? '&q=' + encodeURIComponent(evq) : '')); } catch (e) {
     if (seq !== S.seq) return;
     if (e.status === 401) return login('Your session has ended. Please sign in again.');
     body.innerHTML = `<div class="empty"><b>Couldn't load</b><p>${esc(e.message)}</p><button class="btn btn-ghost" type="button" data-act="retry">Try again</button></div>`;
@@ -107,10 +108,14 @@ async function load(tab, quiet) {
   if (seq !== S.seq || !body.isConnected) return;
   S.counts = d.counts || {}; S.items = d.items || [];
   paintCounts();
-  body.innerHTML = S.items.length ? list(tab, S.items) : empty(tab);
+  body.innerHTML = (tab === 'events' ? evFind() : '') + (S.items.length ? list(tab, S.items) : empty(tab));
 }
 
-const empty = (tab) => `<div class="empty adm-empty">${ic(tab === 'clips' ? 'check' : 'archive', 30)}<b>${EMPTY[tab][0]}</b>${EMPTY[tab][1]}</div>`;
+const empty = (tab) => (tab === 'events' && S.evq
+  ? `<div class="empty adm-empty">${ic('search', 30)}<b>No event matches</b>Try its name, city, date or code.</div>`
+  : `<div class="empty adm-empty">${ic(tab === 'clips' ? 'check' : 'archive', 30)}<b>${EMPTY[tab][0]}</b>${EMPTY[tab][1]}</div>`);
+// The Events tab lists new and recently changed events; this finds any other.
+const evFind = () => `<form class="adm-find adm-evfind" data-form="evfind" role="search">${ic('search', 18)}<input name="q" value="${esc(S.evq)}" placeholder="Find any event by name, place, date or code" aria-label="Find an event" autocomplete="off"><button class="btn btn-ghost btn-sm" type="submit">Find</button>${S.evq ? `<button type="button" class="iconbtn adm-x" data-act="ev-clearfind" aria-label="Show recent events">${ic('x', 16)}</button>` : ''}</form>`;
 function list(tab, items) {
   if (tab === 'log') return logTable(items);
   const row = tab === 'events' ? eventRow : tab === 'reports' ? reportRow : clipCard;
@@ -231,7 +236,7 @@ function drop(el) {
   requestAnimationFrame(() => requestAnimationFrame(() => { el.style.height = '0px'; }));
   setTimeout(() => {
     el.remove();
-    if (listEl && !listEl.children.length && listEl.parentElement?.matches('[data-body]')) listEl.parentElement.innerHTML = empty(S.tab);
+    if (listEl && !listEl.children.length && listEl.parentElement?.matches('[data-body]')) listEl.outerHTML = empty(S.tab);
     else if (had && next?.isConnected) next.focus({ preventScroll: true });
   }, 340);
 }
@@ -385,7 +390,7 @@ function eventRow(ev) {
   const b = (act, label, cls, icon) => `<button type="button" class="btn btn-sm ${cls}" data-act="${act}">${ic(icon, 16)}${label}</button>`;
   const acts = (ev.status === 'pending' ? b('ev-approve', 'Approve', 'btn-primary', 'check') + b('ev-hide', 'Hide', 'btn-ghost', 'eyeoff')
     : ev.status === 'hidden' ? b('ev-unhide', 'Unhide', 'btn-primary', 'eye') : b('ev-hide', 'Hide', 'btn-ghost', 'eyeoff'))
-    + b('ev-edit', 'Edit', 'btn-ghost', 'edit');
+    + b('ev-edit', 'Edit', 'btn-ghost', 'edit') + b('ev-ask-delete', 'Delete', 'adm-danger-ghost', 'trash');
   return `<article class="card adm-evt" data-eid="${ev.id}">
     <div class="adm-evt-top">
       <i class="adm-dot lg" style="background:${esc(ev.color || 'var(--dim)')}"></i>
@@ -396,8 +401,38 @@ function eventRow(ev) {
       </div>
     </div>
     <div class="adm-btns">${acts}</div>
+    <div class="adm-panel" data-panel hidden></div>
     <div data-editslot></div>
   </article>`;
+}
+
+// Deleting is for good, so the moderator types the event's short code to confirm.
+function askDeleteEvent(row) {
+  const ev = S.items.find((x) => x.id === Number(row.dataset.eid)), p = $('[data-panel]', row);
+  if (!ev || !p) return;
+  if (!p.hidden) { p.hidden = true; p.innerHTML = ''; return; }
+  const vids = [ev.n ? `${ev.n} public` : '', ev.pending ? `${ev.pending} waiting for review` : ''].filter(Boolean).join(', ');
+  p.innerHTML = `<b>Delete this event for good?</b>
+    <p>The event page, ${vids ? `all its videos (${vids})` : 'all its videos'} and their files are deleted, and its record numbers stop working. This can’t be undone. To take it offline but keep it, hide it instead.</p>
+    <div class="field" style="margin:0"><label for="ad${ev.id}-code">Type <b class="mono">${esc(ev.code)}</b> to confirm</label><input id="ad${ev.id}-code" class="adm-in mono" data-confirm autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12"></div>
+    <div class="adm-btns"><button type="button" class="btn btn-sm btn-ghost" data-act="ev-cancel-delete">Cancel</button><button type="button" class="btn btn-sm adm-danger" data-act="ev-delete" disabled>${ic('trash', 16)}Delete event and files</button></div>`;
+  p.hidden = false;
+  const inp = $('[data-confirm]', p), go = $('[data-act="ev-delete"]', p);
+  inp.addEventListener('input', () => { go.disabled = inp.value.trim().toUpperCase() !== ev.code; });
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !go.disabled) { e.preventDefault(); deleteEvent(row); } });
+  inp.focus();
+}
+
+async function deleteEvent(row) {
+  const ev = S.items.find((x) => x.id === Number(row.dataset.eid));
+  if (!ev || row.classList.contains('adm-busy')) return;
+  row.classList.add('adm-busy');
+  let d;
+  try { d = await api('/api/admin/event', { body: { id: ev.id, action: 'delete', confirm: $('[data-confirm]', row)?.value.trim() } }); } catch (e) { row.classList.remove('adm-busy'); return fail(e); }
+  S.items = S.items.filter((x) => x !== ev);
+  if (d.counts) { S.counts = d.counts; paintCounts(); }
+  toast('Event deleted', 'trash');
+  if (row.isConnected) { row.classList.remove('adm-busy'); drop(row); }
 }
 
 async function evAct(row, action) {
@@ -517,11 +552,12 @@ async function resolve(rep, status) {
 function logTable(rows) {
   const detail = (d) => { if (typeof d === 'string') { try { d = JSON.parse(d); } catch { d = null; } } return d && typeof d === 'object' ? d : {}; };
   const tone = (a) => (/approve|unhide|resolved|login/.test(a) ? 'ok' : /reject|delete|withdraw/.test(a) ? 'bad' : /hide|dismiss/.test(a) ? 'warn' : '');
-  const target = (r) => (/^ROE-/i.test(r.target) ? `<a href="/r/${esc(r.target)}">${esc(r.target)}</a>` : r.action.startsWith('event:') ? `<a href="/e/${esc(r.target)}">${esc(r.target)}</a>` : esc(r.target));
+  const target = (r) => (/^ROE-/i.test(r.target) ? `<a href="/r/${esc(r.target)}">${esc(r.target)}</a>` : r.action.startsWith('event:') && r.action !== 'event:delete' ? `<a href="/e/${esc(r.target)}">${esc(r.target)}</a>` : esc(r.target));
   return `<div class="adm-tablewrap"><table class="adm-log"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th></tr></thead><tbody>${rows.map((r) => {
     const d = detail(r.detail);
     const changed = d.changed && typeof d.changed === 'object' ? Object.keys(d.changed).map((k) => CHANGED[k] || k) : [];
-    return `<tr><td title="${esc(new Date(r.at).toLocaleString())}">${ago(r.at)}</td><td>${esc(r.actor)}</td><td><span class="adm-act ${tone(r.action)}">${esc(r.action)}</span>${d.reason ? `<small>${esc(d.reason)}</small>` : ''}${changed.length ? `<small>Changed ${esc(changed.join(', '))}</small>` : ''}</td><td class="mono">${target(r)}</td></tr>`;
+    const deleted = r.action === 'event:delete' && d.title ? `<small>${esc(d.title)} · ${Number(d.videos) || 0} video${d.videos === 1 ? '' : 's'}</small>` : '';
+    return `<tr><td title="${esc(new Date(r.at).toLocaleString())}">${ago(r.at)}</td><td>${esc(r.actor)}</td><td><span class="adm-act ${tone(r.action)}">${esc(r.action)}</span>${d.reason ? `<small>${esc(d.reason)}</small>` : ''}${changed.length ? `<small>Changed ${esc(changed.join(', '))}</small>` : ''}${deleted}</td><td class="mono">${target(r)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 
@@ -539,6 +575,9 @@ async function onSubmit(e) {
   if (kind === 'find') {
     const q = f.elements.q.value.trim(), host = $('.adm-found', S.root);
     if (q && host) { host.innerHTML = ''; find(host, q); }
+  } else if (kind === 'evfind') {
+    S.evq = f.elements.q.value.trim();
+    load('events');
   } else if (kind === 'event') saveEvent(f);
   else if (kind === 'clip') saveClip(f);
   else if (kind === 'login') {
@@ -594,6 +633,10 @@ function onClick(e) {
       break;
     }
     case 'ev-cancel': t.closest('[data-editslot]').innerHTML = ''; break;
+    case 'ev-ask-delete': askDeleteEvent(t.closest('.adm-evt')); break;
+    case 'ev-cancel-delete': { const p = t.closest('[data-panel]'); p.hidden = true; p.innerHTML = ''; break; }
+    case 'ev-delete': deleteEvent(t.closest('.adm-evt')); break;
+    case 'ev-clearfind': S.evq = ''; load('events'); break;
     case 'resolve': resolve(t.closest('.adm-rep'), t.dataset.st); break;
     default:
   }

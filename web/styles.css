@@ -396,7 +396,10 @@ img { display: block; max-width: 100%; }
 .mfoot .hint { color: var(--muted); font-size: 13.5px; }
 @media (max-width: 700px) {
   .modal, .modal.sm { top: auto; bottom: 0; left: 0; transform: none; width: 100%; max-height: 92vh; max-height: 92dvh; border-radius: 26px 26px 0 0; animation-name: sheet; }
-  .modal.search { top: 0; bottom: auto; border-radius: 0 0 26px 26px; animation-name: drop; padding-top: env(safe-area-inset-top, 0px); }
+  /* .modal.search outranks .modal, so its desktop centring (left 50%, translateX(-50%)) is undone here. */
+  .modal.search { top: 0; bottom: auto; left: 0; transform: none; width: 100%; border-radius: 0 0 26px 26px; animation-name: drop; padding-top: env(safe-area-inset-top, 0px); }
+  .sinput { padding: 10px 12px 10px 16px; gap: 10px; }
+  .sinput input { min-width: 0; font-size: 17px; }
   .mfoot { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   .mfoot { flex-wrap: wrap; row-gap: 10px; }
   .mfoot .hint { flex: 1 1 140px; }
@@ -536,6 +539,9 @@ mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: in
 .nav a { white-space: nowrap; }
 .searchbtn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 1180px) { .nav { display: none; } .searchbtn { min-width: 0; flex: 0 1 300px; } }
+/* Tablets have no tab bar, so the search box shrinks to an icon instead of disappearing. */
+@media (max-width: 960px) { .searchbtn { display: grid; place-items: center; flex: none; width: 42px; padding: 0; } .searchbtn span, .searchbtn kbd { display: none; } }
+@media (max-width: 700px) { .searchbtn { display: none; } }
 .justin { align-self: start; }
 
 .hourgroup, #evmain { scroll-margin-top: 190px; }
