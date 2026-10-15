@@ -1,5 +1,5 @@
 // Idempotent schema. Bump SCHEMA_VERSION after changing it; it runs once on the next cold start.
-export const SCHEMA_VERSION = '5';
+export const SCHEMA_VERSION = '6';
 
 export const SCHEMA = `
 create table if not exists meta (k text primary key, v text not null);
@@ -115,6 +115,9 @@ alter table clips add column if not exists link_job jsonb;
 -- Where the event happened (picked from the place search), so filming spots are searched nearby first.
 alter table events add column if not exists lat double precision;
 alter table events add column if not exists lon double precision;
+
+-- Details a moderator corrected after upload ('place', 'note'), so the record doesn't credit them to the uploader.
+alter table clips add column if not exists edited text[] not null default '{}';
 
 -- Repair: an earlier version stored some jsonb values as JSON strings (double-encoded).
 update events set sources = (sources #>> '{}')::jsonb where jsonb_typeof(sources) = 'string';

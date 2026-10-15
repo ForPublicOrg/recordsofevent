@@ -88,6 +88,16 @@ export function localMin(iso, tz) {
   try { partsFmt(tz).formatToParts(new Date(iso)).forEach((x) => { p[x.type] = x.value; }); } catch { return new Date(iso).getTime() / 60000; }
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) / 60000;
 }
+// The other way: a wall-clock time there ('YYYY-MM-DDTHH:MM[:SS]', as a datetime-local input
+// gives it) → the moment it was, or null. The second pass settles times next to a DST change.
+export function fromLocal(value, tz) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?$/.exec(value || '');
+  if (!m) return null;
+  const want = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+  let t = want;
+  for (let i = 0; i < 2; i++) t += want - Math.round(localMin(t, tz) * 60000);
+  return new Date(t);
+}
 const D = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export function fmtTime(lm, withSec) {

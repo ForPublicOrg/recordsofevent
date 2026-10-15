@@ -1,6 +1,6 @@
 // Moderator area: sign-in, review queue, events, reports, hidden, recently published, log, record search.
-import { $, $$, ic, esc, api, toast, copy, dur, bytes, fmtTime, localMin, fmtDate, tzName, LABEL, ago, config, setModerator } from './util.js';
-import { comboHtml, placePicker, countryPicker, countryByCode, findCountry, zoneFor } from './combo.js';
+import { $, $$, ic, esc, api, toast, copy, dur, bytes, fmtTime, localMin, fromLocal, fmtDate, tzName, LABEL, ago, config, setModerator } from './util.js';
+import { combo, comboHtml, placePicker, spotName, countryPicker, countryByCode, findCountry, zoneFor } from './combo.js';
 
 const TABS = [
   ['clips', 'Review queue', 'film'], ['events', 'Events', 'calendar'], ['reports', 'Reports', 'flag'],
@@ -19,7 +19,10 @@ const REASONS = {
   'wrong-time': 'Wrong date or time', private: 'Private place or private details', copyright: 'Copyright claim',
   illegal: 'Illegal content', other: 'Something else',
 };
-const TS = { metadata: 'Time from camera metadata', file: 'Time from file date', manual: 'Time entered by uploader' };
+const TS = { metadata: 'Time from camera metadata', file: 'Time from file date', manual: 'Time entered by uploader', moderator: 'Time corrected by a moderator' };
+const TS_PICK = { metadata: 'Camera metadata', file: 'File date (approximate)', manual: 'Entered by the uploader', moderator: 'Corrected by a moderator' };
+const REASONED = ['hidden', 'rejected', 'removed', 'withdrawn']; // statuses whose reason is shown publicly
+const CHANGED = { event: 'event', place: 'place', filmed: 'filming time', timeSource: 'time source', duration: 'length', width: 'width', height: 'height', note: 'note', reason: 'public reason' };
 const CLIP_ST = { pending: 'Waiting for review', published: 'Public', hidden: 'Hidden', rejected: 'Rejected', removed: 'File deleted', withdrawn: 'Removed by uploader' };
 const EV_ST = { pending: 'Waiting for review', published: 'Public', hidden: 'Hidden' };
 const QUICK = [
@@ -38,6 +41,8 @@ const DONE = { approve: 'Approved, now public', unhide: 'Public again', hide: 'H
 let S = null, keyFn = null, TZS = null;
 const bound = new WeakSet();
 const pickers = new WeakMap(); // event edit form → its [city, country] pickers
+const clipForms = new WeakMap(); // clip edit form → its state (see bindClipForm)
+const CLIPS = new Map(); // clip id → its data as last drawn
 
 export async function renderAdmin(root) {
   const s = S = { root, tab: 'clips', counts: {}, items: [], who: '', seq: 0 };
@@ -117,9 +122,11 @@ function paintCounts() {
 
 /* ---------- clips ---------- */
 function clipCard(c) {
+  CLIPS.set(c.id, c);
   const tz = c.event?.tz || 'UTC', lm = localMin(c.t, tz);
   const day = new Date(Math.floor(lm) * 60000).toISOString().slice(0, 10);
   const ev = c.event || {};
+  const byMod = (k) => (c.edited?.includes(k) ? '<small>Corrected by a moderator</small>' : '');
   return `<article class="adm-clip" tabindex="-1" data-id="${c.id}" data-status="${esc(c.status)}" data-label="${esc(c.label)}" data-sens="${c.sensitive ? 1 : 0}" aria-label="${esc(c.record || 'Upload ' + c.id)}">
     <div class="adm-media">${c.video
     ? `<video controls preload="metadata" playsinline src="${esc(c.video)}"${c.poster ? ` poster="${esc(c.poster)}"` : ''}></video>`
@@ -134,28 +141,30 @@ function clipCard(c) {
       <dl class="adm-kv">
         <dt>Filmed</dt><dd>${fmtDate(day)}, ${fmtTime(lm, true)} ${esc(tzName(tz, c.t))}<small>${TS[c.ts] || esc(c.ts)}</small></dd>
         <dt>File</dt><dd>${dur(c.d)} · ${bytes(c.z)} · ${c.w && c.h ? `${c.w}×${c.h}` : 'size unknown'}<small>${esc(c.mime || '')}</small></dd>
-        <dt>Place</dt><dd>${c.place ? esc(c.place) : '<span class="adm-dim">Not given</span>'}</dd>
+        <dt>Place</dt><dd>${c.place ? esc(c.place) : '<span class="adm-dim">Not given</span>'}${byMod('place')}</dd>
         <dt>Removed</dt><dd>${c.stripped?.length ? c.stripped.map((x) => `<span class="adm-tag">${esc(x)}</span>`).join('') : '<span class="adm-dim">Nothing</span>'}</dd>
         <dt>Uploaded</dt><dd>${ago(c.created)}</dd>
         ${c.sha ? `<dt>SHA-256</dt><dd><button type="button" class="adm-hash mono" data-copy="${esc(c.sha)}" title="Copy fingerprint">${esc(c.sha.slice(0, 20))}…${ic('copy', 13)}</button></dd>` : ''}
       </dl>
-      ${c.note ? `<blockquote class="adm-quote">${ic('quote', 16)}<span>${esc(c.note)}</span></blockquote>` : ''}
+      ${c.note ? `<blockquote class="adm-quote">${ic('quote', 16)}<span>${esc(c.note)}${c.edited?.includes('note') ? '<small>Edited by a moderator</small>' : ''}</span></blockquote>` : ''}
       ${c.reason ? `<p class="adm-public">${ic('info', 15)}<span>Public note: ${esc(c.reason)}</span></p>` : ''}
       ${controls(c)}
       <div class="adm-panel" data-panel hidden></div>
+      <div data-editslot></div>
     </div>
   </article>`;
 }
 
 function controls(c) {
-  if (!['pending', 'published', 'hidden'].includes(c.status)) return '';
+  const b = (act, label, cls, icon) => `<button type="button" class="btn btn-sm ${cls}" data-act="${act}">${ic(icon, 16)}${label}</button>`;
+  const edit = b('clip-edit', 'Edit details', 'btn-ghost', 'edit');
+  if (!['pending', 'published', 'hidden'].includes(c.status)) return `<div class="adm-btns">${edit}</div>`;
   const seg = `<div class="adm-seg" role="radiogroup" aria-label="Label">${Object.keys(LABEL).map((k) => `<button type="button" role="radio" data-setlabel="${k}" aria-checked="${k === c.label}" class="${k === c.label ? 'on' : ''}" title="${esc(LABEL[k][2])}">${ic(LABEL[k][1], 14, 2.4)}<span>${LABEL[k][0]}</span></button>`).join('')}</div>`;
   const sens = `<button type="button" class="adm-sens${c.sensitive ? ' on' : ''}" data-act="sens" aria-pressed="${!!c.sensitive}">${ic('eyeoff', 16)}Sensitive</button>`;
-  const b = (act, label, cls, icon) => `<button type="button" class="btn btn-sm ${cls}" data-act="${act}">${ic(icon, 16)}${label}</button>`;
   const btns = c.status === 'pending' ? b('approve', 'Approve', 'btn-primary', 'check') + b('ask-reject', 'Reject', 'adm-danger-ghost', 'x')
     : c.status === 'published' ? b('update', 'Save label', 'btn-ghost', 'check') + b('ask-hide', 'Hide', 'btn-ghost', 'eyeoff') + b('ask-delete', 'Delete file', 'adm-danger-ghost', 'trash')
       : b('unhide', 'Unhide', 'btn-primary', 'eye') + b('ask-delete', 'Delete', 'adm-danger-ghost', 'trash');
-  return `<div class="adm-ctl">${seg}${sens}</div><div class="adm-btns">${btns}</div>`;
+  return `<div class="adm-ctl">${seg}${sens}</div><div class="adm-btns">${btns}${edit}</div>`;
 }
 
 function setLabel(card, k) {
@@ -225,6 +234,135 @@ function drop(el) {
     if (listEl && !listEl.children.length && listEl.parentElement?.matches('[data-body]')) listEl.parentElement.innerHTML = empty(S.tab);
     else if (had && next?.isConnected) next.focus({ preventScroll: true });
   }, 340);
+}
+
+/* ---------- clip details ---------- */
+// Times are typed as the wall clock where the event happened, like everywhere else on the site.
+const inputTime = (iso, tz) => new Date(Math.round(localMin(iso, tz) * 60) * 1000).toISOString().slice(0, 19);
+const tzLabel = (tz, iso) => `${tzName(tz, iso)}, local time`;
+// '1:02:03', '2:03' or '123' → seconds; '' → null; anything else → NaN.
+function seconds(s) {
+  if (!s) return null;
+  const parts = s.split(':');
+  if (parts.length > 3 || !parts.every((x) => /^\d+(\.\d+)?$/.test(x))) return NaN;
+  return parts.reduce((t, x) => t * 60 + Number(x), 0);
+}
+
+function clipForm(c) {
+  const p = `ac${c.id}-`, ev = c.event || {}, tz = ev.tz || 'UTC';
+  const inp = (n, label, val, extra = '') => `<div class="field"><label for="${p}${n}">${label}</label><input id="${p}${n}" name="${n}" value="${esc(val ?? '')}" ${extra}></div>`;
+  const px = 'type="number" min="1" max="16384" step="1" inputmode="numeric" placeholder="Unknown"';
+  return `<form class="adm-edit" data-form="clip" novalidate>
+    <div class="field"><label for="${p}event">Event</label>${comboHtml(`${p}event`, { icon: 'calendar', chevron: true, value: ev.title, placeholder: 'Search by name, place or date' })}</div>
+    <div class="field"><label for="${p}place">Where it was filmed <small>leave empty if unknown</small></label>${comboHtml(`${p}place`, { name: 'place', icon: 'pin', value: c.place, placeholder: 'Search a street, square or landmark' })}</div>
+    <div class="row2">
+      <div class="field"><label for="${p}captured">Filmed <small data-tzname>${esc(tzLabel(tz, c.t))}</small></label><input id="${p}captured" name="captured" type="datetime-local" step="1" value="${inputTime(c.t, tz)}"></div>
+      <div class="field"><label for="${p}ts">Time comes from</label><select id="${p}ts" name="ts">${Object.entries(TS_PICK).map(([k, t]) => `<option value="${k}"${k === c.ts ? ' selected' : ''}>${t}</option>`).join('')}</select></div>
+    </div>
+    <div class="adm-file-grid">
+      ${inp('duration', 'Length <small>m:ss</small>', c.d ? dur(c.d) : '', 'inputmode="numeric" placeholder="Unknown" autocomplete="off"')}
+      ${inp('width', 'Width <small>px</small>', c.w, px)}${inp('height', 'Height <small>px</small>', c.h, px)}
+    </div>
+    <div class="field"><label for="${p}note">Uploader’s note <small>shown publicly</small></label><textarea id="${p}note" name="note" rows="2" maxlength="500">${esc(c.note || '')}</textarea></div>
+    ${REASONED.includes(c.status) ? `<div class="field"><label for="${p}reason">Public reason <small>shown on the record</small></label><textarea id="${p}reason" name="reason" rows="2" maxlength="300">${esc(c.reason || '')}</textarea></div>` : ''}
+    <p class="adm-hint">${ic('lock', 14)}<span>The record number, file size and type, fingerprints and the list of removed details come from the file itself, so they can’t be changed.</span></p>
+    <p class="adm-err" role="alert"></p>
+    <div class="adm-btns"><button type="button" class="btn btn-sm btn-ghost" data-act="clip-cancel">Cancel</button><button class="btn btn-sm btn-primary" type="submit">${ic('check', 16)}Save details</button></div>
+  </form>`;
+}
+
+// The event is picked from a search of all events; places are searched near the chosen event,
+// its own places first. Moving the clip keeps the moment it was filmed, shown in the new event's time zone.
+function bindClipForm(form, c) {
+  const p = `ac${c.id}-`, el = form.elements;
+  const st = { c, ev: { ...c.event }, places: [], time: el.captured.value, init: { duration: el.duration.value, width: el.width.value, height: el.height.value } };
+  const loadPlaces = async (ev) => {
+    try { const r = await api(`/api/admin/places?event=${ev.id}`); if (st.ev.id === ev.id) st.places = r.places || []; } catch { /* search still works without them */ }
+  };
+  const where = (e) => [e.date ? fmtDate(e.date) : '', e.city, e.status && e.status !== 'published' ? EV_ST[e.status] : ''].filter(Boolean).map(esc).join(' · ');
+  st.event = combo($(`#${p}event`, form), {
+    value: st.ev, text: (e) => e.title, delay: 200,
+    async search(q) {
+      try { return (await api(`/api/admin/events?q=${encodeURIComponent(q)}`, { retry: false })).events; } catch (e) { return { items: [], error: e.message }; }
+    },
+    option: (e) => `<span class="oi"><i class="adm-dot" style="background:${esc(e.color || 'var(--dim)')}"></i></span><span><b>${esc(e.title)}</b><small>${where(e)}</small></span>`,
+    note: (e) => (where(e) ? `${ic('calendar', 14)}<span>${where(e)}</span>` : ''),
+    none: 'No event matches. Try its name, city or date.',
+    invalid: 'Pick an event from the list.',
+    onPick(e) {
+      if (!e || e.id === st.ev.id) return;
+      const at = fromLocal(el.captured.value, st.ev.tz || 'UTC');
+      const unchanged = el.captured.value === st.time;
+      st.ev = e; st.places = [];
+      if (at) {
+        el.captured.value = inputTime(at.toISOString(), e.tz || 'UTC');
+        if (unchanged) st.time = el.captured.value;
+        $('[data-tzname]', form).textContent = tzLabel(e.tz || 'UTC', at.toISOString());
+      }
+      loadPlaces(e);
+    },
+  });
+  st.place = placePicker($(`#${p}place`, form), {
+    kind: 'spot', near: () => st.ev, local: () => st.places, label: (pl) => spotName(pl, st.ev),
+    value: c.place ? { name: c.place } : null, onPick: () => {},
+  });
+  el.captured.addEventListener('change', () => { if (el.captured.value !== st.time) el.ts.value = 'moderator'; });
+  clipForms.set(form, st);
+  loadPlaces(st.ev);
+}
+
+async function saveClip(form) {
+  const card = form.closest('.adm-clip'), err = $('.adm-err', form), st = clipForms.get(form);
+  if (!card || !st) return;
+  const el = form.elements, g = (n) => String(el[n]?.value ?? '').trim();
+  const bad = (msg, field) => { err.textContent = msg; field?.focus(); };
+  if (!st.event.check() || !st.event.get()) return bad('Pick the event from the list.', $('[role="combobox"]', form));
+  if (!st.place.check()) return bad('Pick the place from the list, or leave it empty.', el.place);
+  const fields = { event: st.ev.id, place: g('place'), ts: g('ts'), note: el.note.value };
+  if (g('captured') !== st.time) {
+    const at = fromLocal(g('captured'), st.ev.tz || 'UTC');
+    if (!at) return bad('Enter the date and time it was filmed.', el.captured);
+    fields.captured = at.toISOString();
+  }
+  if (g('duration') !== st.init.duration) {
+    const d = seconds(g('duration'));
+    if (Number.isNaN(d) || d === 0) return bad('Write the length as m:ss (or h:mm:ss), or leave it empty.', el.duration);
+    fields.duration = d;
+  }
+  for (const k of ['width', 'height']) {
+    if (el[k].validity.badInput) return bad(`The ${k} is a whole number of pixels, or empty.`, el[k]);
+    if (g(k) === st.init[k]) continue;
+    const n = g(k) ? Number(g(k)) : null;
+    if (n !== null && !(Number.isInteger(n) && n > 0 && n <= 16384)) return bad(`The ${k} is a whole number of pixels, or empty.`, el[k]);
+    fields[k] = n;
+  }
+  if (el.reason) {
+    if (!g('reason')) return bad('Give a reason, it is shown publicly.', el.reason);
+    fields.reason = g('reason');
+  }
+  err.textContent = '';
+  const btn = $('button[type=submit]', form); btn.disabled = true;
+  let d;
+  try { d = await api('/api/admin/clip', { body: { id: st.c.id, action: 'edit', label: card.dataset.label, sensitive: card.dataset.sens === '1', fields } }); } catch (e) {
+    btn.disabled = false;
+    return e.status === 401 ? fail(e) : bad(e.message);
+  }
+  if (!card.isConnected) return;
+  $$('video', card).forEach((v) => v.pause());
+  const tmp = document.createElement('div'); tmp.innerHTML = clipCard(d.clip);
+  const fresh = tmp.firstElementChild;
+  card.replaceWith(fresh);
+  fresh.focus({ preventScroll: true });
+  toast('Details saved');
+}
+
+function toggleClipEdit(card) {
+  const slot = $('[data-editslot]', card), c = CLIPS.get(Number(card.dataset.id));
+  if (!slot || !c) return;
+  if (slot.children.length) { slot.innerHTML = ''; return; }
+  slot.innerHTML = clipForm(c);
+  bindClipForm($('form', slot), c);
+  slot.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 /* ---------- find ---------- */
@@ -382,7 +520,8 @@ function logTable(rows) {
   const target = (r) => (/^ROE-/i.test(r.target) ? `<a href="/r/${esc(r.target)}">${esc(r.target)}</a>` : r.action.startsWith('event:') ? `<a href="/e/${esc(r.target)}">${esc(r.target)}</a>` : esc(r.target));
   return `<div class="adm-tablewrap"><table class="adm-log"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th></tr></thead><tbody>${rows.map((r) => {
     const d = detail(r.detail);
-    return `<tr><td title="${esc(new Date(r.at).toLocaleString())}">${ago(r.at)}</td><td>${esc(r.actor)}</td><td><span class="adm-act ${tone(r.action)}">${esc(r.action)}</span>${d.reason ? `<small>${esc(d.reason)}</small>` : ''}</td><td class="mono">${target(r)}</td></tr>`;
+    const changed = d.changed && typeof d.changed === 'object' ? Object.keys(d.changed).map((k) => CHANGED[k] || k) : [];
+    return `<tr><td title="${esc(new Date(r.at).toLocaleString())}">${ago(r.at)}</td><td>${esc(r.actor)}</td><td><span class="adm-act ${tone(r.action)}">${esc(r.action)}</span>${d.reason ? `<small>${esc(d.reason)}</small>` : ''}${changed.length ? `<small>Changed ${esc(changed.join(', '))}</small>` : ''}</td><td class="mono">${target(r)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 
@@ -401,6 +540,7 @@ async function onSubmit(e) {
     const q = f.elements.q.value.trim(), host = $('.adm-found', S.root);
     if (q && host) { host.innerHTML = ''; find(host, q); }
   } else if (kind === 'event') saveEvent(f);
+  else if (kind === 'clip') saveClip(f);
   else if (kind === 'login') {
     const fd = new FormData(f), btn = $('button[type=submit]', f), err = $('.adm-err', f);
     btn.disabled = true; err.textContent = '';
@@ -432,6 +572,8 @@ function onClick(e) {
     case 'retry': load(S.tab); break;
     case 'logout': t.disabled = true; api('/api/admin/logout', { method: 'POST' }).catch(() => {}).then(() => { setModerator(false); login(); }); break;
     case 'sens': toggleSens(card); break;
+    case 'clip-edit': toggleClipEdit(card); break;
+    case 'clip-cancel': t.closest('[data-editslot]').innerHTML = ''; card?.focus({ preventScroll: true }); break;
     case 'approve': case 'unhide': case 'update': clipAct(card, act); break;
     case 'ask-reject': case 'ask-hide': case 'ask-delete': ask(card, act.slice(4)); break;
     case 'cancel': closePanel(t.closest('[data-panel]')); break;

@@ -154,7 +154,8 @@ function tick() { if (P) (P.reel ? tickReel : tickDesk)(); }
 function infoHtml(c) {
   const ev = P.ev;
   const steps = { unverified: 2, consistent: 3, verified: 4, disputed: 2 }[c.s] || 2;
-  const src = { metadata: 'from the video file', file: 'from the file date — approximate', manual: 'set by the uploader' }[c.ts] || '';
+  const src = { metadata: 'from the video file', file: 'from the file date — approximate', manual: 'set by the uploader', moderator: 'corrected by a moderator' }[c.ts] || '';
+  const edited = (k) => (c.ed || []).includes(k);
   return `
     <div class="rid"><b>${c.r}</b><button class="btn btn-sm" style="background:rgba(255,255,255,.07)" data-action="copyid">${ic('copy', 15)}Copy</button></div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${badge(c.s)}${c.x ? `<span class="badge disputed">${ic('eyeoff', 13)}Sensitive</span>` : ''}</div>
@@ -162,12 +163,12 @@ function infoHtml(c) {
     <h3>${c.place ? esc(c.place) + ' · ' : ''}${fmtTime(c.lm)}</h3>
     <dl class="kv">
       <dt>Filmed</dt><dd>${fmtDay(c.lm)}, ${fmtTime(c.lm, true)} ${tzName(ev.tz, c.t)}<small>${src}</small></dd>
-      ${c.place ? `<dt>Place</dt><dd>${esc(c.place)}<small>chosen by the uploader</small></dd>` : ''}
+      ${c.place ? `<dt>Place</dt><dd>${esc(c.place)}<small>${edited('place') ? 'corrected by a moderator' : 'chosen by the uploader'}</small></dd>` : ''}
       <dt>Event</dt><dd><a href="/e/${ev.slug}" style="text-decoration:underline;text-underline-offset:3px">${esc(ev.title)}</a></dd>
       <dt>File</dt><dd>${c.w && c.h ? `${c.w}×${c.h} · ` : ''}${dur(c.d)} · ${bytes(c.z)}<small>${c.stripped && c.stripped.length ? 'Original file; hidden location/phone details removed before upload' : 'Original file, unchanged'}</small></dd>
       <dt>Licence</dt><dd>CC BY 4.0 · Anonymous</dd>
     </dl>
-    ${c.n ? `<div class="note"><small>Uploader’s note</small>“${esc(c.n)}”</div>` : ''}
+    ${c.n ? `<div class="note"><small>Uploader’s note${edited('note') ? ' · edited by a moderator' : ''}</small>“${esc(c.n)}”</div>` : ''}
     <div><div class="hlabel">Fingerprint · SHA-256</div><div class="hash">${ic('hash', 15)}<span>${c.sha}</span><button data-action="copyhash" aria-label="Copy fingerprint">${ic('copy', 15)}</button></div>
     ${c.sho && c.sho !== c.sha ? `<div class="hlabel" style="margin-top:8px">Before details were removed (uploader’s copy)</div><div class="hash">${ic('hash', 15)}<span>${c.sho}</span></div>` : ''}</div>
     <div class="actions2">

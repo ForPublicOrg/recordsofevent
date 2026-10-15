@@ -40,7 +40,7 @@ export function zoneFor(place, country, current) {
 // o.option(item) → the row's HTML · o.text(item) → what the box shows · o.note(item) → HTML under the box
 // o.onPick(item | null) · o.value: the current item · o.delay: ms to wait while typing (remote search)
 // o.exact(text) → an item the typed text names exactly · o.none / o.invalid: messages
-function combo(input, o) {
+export function combo(input, o) {
   const box = input.closest('.combo'), list = $('.combo-list', box), note = $('.combo-note', box);
   let items = [], active = -1, picked = o.value || null, seq = 0, timer = 0, dirty = false;
   const text = (it) => (it ? o.text(it) : '');
@@ -181,6 +181,15 @@ export function countryPicker(input, { value = null, onPick }) {
     none: 'No country by that name.',
     invalid: 'Pick a country from the list.',
   });
+}
+
+// A filming spot as saved for event `ev`: "Uhuru Park" near the event (within 30 km, or in its
+// city); "Times Square, New York" anywhere else.
+const km = (a, b) => Math.hypot((b.lon - a.lon) * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180), b.lat - a.lat) * 111.2;
+export function spotName(p, ev) {
+  const near = !p.city || norm(p.city) === norm(p.name) || !ev
+    || (ev.lat != null && p.lat != null ? km(ev, p) < 30 : norm(p.city) === norm(ev.city));
+  return (near ? p.name : `${p.name}, ${p.city}`).slice(0, 80);
 }
 
 // kind 'city': where an event happened (results carry a time zone when known).

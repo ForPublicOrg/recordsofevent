@@ -65,6 +65,7 @@
 .adm-hash:hover { color: var(--text); }
 .adm-quote { margin: 0; display: flex; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; overflow-wrap: anywhere; }
 .adm-quote svg { flex: none; margin-top: 2px; color: var(--dim); }
+.adm-quote small { display: block; margin-top: 3px; color: var(--dim); font-size: 12px; }
 .adm-public { margin: 0; display: flex; gap: 8px; align-items: flex-start; color: var(--warn-ink); font-size: 13.5px; }
 .adm-public svg { flex: none; margin-top: 2px; }
 
@@ -109,6 +110,9 @@
 .adm-fig legend { padding: 0 6px; font-size: 14px; font-weight: 600; }
 .adm-fig-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
 .adm-fig-grid > * { min-width: 0; }
+.adm-file-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.adm-hint { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 14px; color: var(--dim); font-size: 13px; }
+.adm-hint svg { flex: none; margin-top: 2px; }
 
 /* reports */
 .adm-rep { display: grid; gap: 10px; }
@@ -167,7 +171,8 @@
   .adm-resolve .adm-btns { flex: 1 1 100%; }
   .adm .row2 { grid-template-columns: 1fr; gap: 0; }
   .adm-fig-grid { grid-template-columns: 1fr 1fr; gap: 0 12px; }
-  .adm-fig-grid > :first-child { grid-column: 1 / -1; }
+  .adm-fig-grid > :first-child, .adm-file-grid > :first-child { grid-column: 1 / -1; }
+  .adm-file-grid { grid-template-columns: 1fr 1fr; gap: 0 12px; }
   .adm-kv { grid-template-columns: 70px minmax(0, 1fr); }
   .adm-login { padding: 22px 18px; }
 }

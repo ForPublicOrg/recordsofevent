@@ -88,6 +88,7 @@ git push -u origin main
 `/admin` has a review queue (keyboard: `J`/`K` move, `A` approve, `R` reject, `S` sensitive), events (approve, hide, edit summary, sources and figures), reports, hidden clips, recently published clips, and a log of every moderator action.
 
 - **Labels**: *Verified*, *Place checked*, *Not yet verified*, *Disputed*.
+- **Editing a video**: *Edit details* on any video changes its event, where it was filmed, when it was filmed (and where that time came from), its length and size in pixels, the uploader's note and the public reason. The record number, file size and type, fingerprints and removed details come from the file and can't be changed. A corrected place or note is marked on the record as changed by a moderator, and the log lists each change.
 - **Removal** keeps the record number with a public note and reason; the file is deleted.
 - Three separate reports on one clip hide it automatically until a moderator looks.
 - Set `MODERATION=post` to publish videos immediately and review afterwards.

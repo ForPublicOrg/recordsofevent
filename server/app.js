@@ -24,6 +24,8 @@ const SECRET = env.APP_SECRET || crypto.createHash('sha256').update('roe:' + (en
 const KINDS = ['Protest', 'March', 'Rally', 'Strike', 'Vigil', 'Election', 'Disaster', 'Accident', 'Public meeting', 'Other'];
 const LABELS = ['verified', 'consistent', 'unverified', 'disputed'];
 const REASONS = ['me', 'injury', 'wrong-event', 'wrong-time', 'private', 'copyright', 'illegal', 'other'];
+const TIME_SOURCES = ['metadata', 'file', 'manual', 'moderator']; // 'moderator' only through moderation
+const REASONED = ['hidden', 'rejected', 'removed', 'withdrawn']; // statuses whose reason is shown publicly
 const PALETTE = ['#ff3d7f', '#ff7a1a', '#22c3e6', '#8b5cf6', '#12b886', '#ffb020', '#e64980', '#4c6ef5', '#f03e3e', '#0ca678'];
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'webm', 'mkv', '3gp', 'avi', 'mts', 'ts'];
@@ -132,7 +134,7 @@ const EVENT_SQL = `select e.id, e.slug, e.code, e.title, e.kind, e.date, e.tz, e
   left join lateral (select count(*)::int as nplaces from places p where p.event_id = e.id) pl on true`;
 // Columns pubClip needs (keys are only used to sign media URLs, never sent as-is).
 const CLIP_COLS = `c.id, c.record, c.event_id, c.place_id, c.captured_at, c.duration, c.width, c.height, c.label, c.sensitive, c.note,
-  c.size, c.sha256, c.sha256_original, c.time_source, c.has_poster, c.mime, c.stripped, c.published_at, c.storage_key, c.poster_key`;
+  c.size, c.sha256, c.sha256_original, c.time_source, c.has_poster, c.mime, c.stripped, c.edited, c.published_at, c.storage_key, c.poster_key`;
 
 const isLive = (e) => e.status !== 'hidden' && ((e.last_upload && Date.now() - new Date(e.last_upload).getTime() < 3 * 3600e3) || e.date === todayIn(e.tz));
 
@@ -152,7 +154,7 @@ function pubClip(c) {
   return {
     r: c.record, t: c.captured_at, d: c.duration, w: c.width, h: c.height, p: c.place_id, s: c.label, x: c.sensitive,
     n: c.note, z: c.size, sha: c.sha256, sho: c.sha256_original, ts: c.time_source, img: c.has_poster, m: c.mime,
-    stripped: c.stripped || [], at: c.published_at,
+    stripped: c.stripped || [], ed: c.edited || [], at: c.published_at,
     pu: posterUrl(c), vu: store.getUrl(c.storage_key), du: store.getUrl(c.storage_key, { download: downloadName(c) }),
   };
 }
@@ -187,6 +189,7 @@ async function sparksFor(ids, bins = 22) {
 }
 
 async function eventBySlug(slug) { return q1(`${EVENT_SQL} where e.slug = $1`, [slug]); }
+const upsertPlace = (eventId, name) => q1('insert into places (event_id, name) values ($1, $2) on conflict (event_id, lower(name)) do update set name = places.name returning id', [eventId, name]).then((r) => r.id);
 
 /* ---------- public API ---------- */
 async function apiConfig() {
@@ -473,7 +476,7 @@ async function apiUploadStart(req) {
   const [uploadId, batchId, placeId] = await Promise.all([
     store.createMultipart(key),
     fresh ? q1('insert into batches (token, event_id, ip) values ($1, $2, $3) returning id', [shaHex(token), e.id, ip]).then((r) => r.id) : e.batch_id,
-    place ? q1('insert into places (event_id, name) values ($1, $2) on conflict (event_id, lower(name)) do update set name = places.name returning id', [e.id, place]).then((r) => r.id) : null,
+    place ? upsertPlace(e.id, place) : null,
   ]);
   const stripped = (link ? link.f : Array.isArray(f.stripped) ? f.stripped : []).filter((s) => typeof s === 'string').slice(0, 8).map((s) => s.slice(0, 40));
   const timeSource = ['metadata', 'file', 'manual'].includes(f.ts) ? f.ts : 'file';
@@ -668,14 +671,14 @@ function adminClip(c) {
   return {
     id: c.id, record: c.record, status: c.status, label: c.label, sensitive: c.sensitive, note: c.note, place: c.place || '',
     t: c.captured_at, ts: c.time_source, d: c.duration, w: c.width, h: c.height, z: c.size, mime: c.mime, reason: c.reason,
-    stripped: c.stripped || [], created: c.created_at, sha: c.sha256,
-    event: { slug: c.slug, title: c.title, color: c.color, tz: c.tz, status: c.estatus },
+    stripped: c.stripped || [], edited: c.edited || [], created: c.created_at, sha: c.sha256,
+    event: { id: c.event_id, slug: c.slug, title: c.title, color: c.color, tz: c.tz, status: c.estatus, date: c.edate, city: c.ecity, lat: c.elat ?? null, lon: c.elon ?? null },
     video: ['withdrawn', 'removed', 'rejected'].includes(c.status) ? null : store.getUrl(c.storage_key),
     poster: c.has_poster && !['withdrawn', 'removed', 'rejected'].includes(c.status) ? store.getUrl(c.poster_key) : null,
     reports: c.reports || 0,
   };
 }
-const ADMIN_CLIP_SQL = `select c.*, p.name as place, e.slug, e.title, e.color, e.tz, e.status as estatus,
+const ADMIN_CLIP_SQL = `select c.*, p.name as place, e.slug, e.title, e.color, e.tz, e.status as estatus, e.date as edate, e.city as ecity, e.lat as elat, e.lon as elon,
   (select count(*)::int from reports r where r.clip_id = c.id and r.status = 'open') as reports
   from clips c join events e on e.id = c.event_id left join places p on p.id = c.place_id`;
 
@@ -705,6 +708,70 @@ async function adminFind(url) {
   return { items: rows.map(adminClip) };
 }
 
+// Events a clip can be moved to, in any status: by title, place, date, slug or code, newest first.
+async function adminEvents(url) {
+  const words = str(url.searchParams.get('q'), 80).toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
+  const hay = `(e.title || ' ' || e.city || ' ' || e.country || ' ' || e.date || ' ' || e.slug || ' ' || e.code || ' ' || array_to_string(e.aliases, ' '))`;
+  const rows = await q(`select e.id, e.slug, e.title, e.date, e.city, e.country, e.color, e.tz, e.lat, e.lon, e.status from events e
+    ${words.length ? `where ${hay} ilike all($1)` : ''} order by e.date desc, e.id desc limit 10`, words.length ? [words.map((w) => `%${w}%`)] : []);
+  return { events: rows };
+}
+
+// An event's places, most used first: offered first when correcting where a clip was filmed.
+async function adminPlaces(url) {
+  return { places: await q(`select p.name from places p left join clips c on c.place_id = p.id and c.status in ('pending', 'published')
+    where p.event_id = $1 group by p.id, p.name order by count(c.id) desc, p.name limit 40`, [Number(url.searchParams.get('event')) || 0]) };
+}
+
+// A moderator's corrections to a clip's details; only the fields sent change. What was measured from
+// the file itself (record number, size, type, fingerprints, what was removed) stays as it is.
+// Returns { field: [before, after] } for the log.
+async function editClip(c, f, label, sensitive) {
+  const cols = ['label', 'sensitive'], vals = [label, sensitive], changed = {}, marks = [];
+  const set = (col, val) => { cols.push(col); vals.push(val); };
+  const cur = await q1('select e.slug, p.name as place from events e left join places p on p.id = $2 where e.id = $1', [c.event_id, c.place_id]);
+  let eventId = c.event_id;
+  if (f.event !== undefined && Number(f.event) !== c.event_id) {
+    const e = await q1('select id, slug from events where id = $1', [Number(f.event) || 0]);
+    need(e, 'Pick the event from the list.');
+    eventId = e.id;
+    set('event_id', e.id); changed.event = [cur.slug, e.slug];
+  }
+  // Places belong to an event, so a moved clip takes its place name along to the new event.
+  const was = cur.place || '', place = f.place !== undefined ? str(f.place, 80) : was;
+  if (place !== was || eventId !== c.event_id) {
+    set('place_id', place ? await upsertPlace(eventId, place) : null);
+    if (place !== was) { changed.place = [was, place]; marks.push('place'); }
+  }
+  if (f.captured !== undefined) {
+    const t = new Date(f.captured), before = new Date(c.captured_at);
+    need(!isNaN(t) && t.getFullYear() >= 1990 && t.getTime() < Date.now() + 864e5, 'Check the filming time.');
+    if (t.getTime() !== before.getTime()) { set('captured_at', t.toISOString()); changed.filmed = [before.toISOString(), t.toISOString()]; }
+  }
+  if (f.ts !== undefined && f.ts !== c.time_source) {
+    need(TIME_SOURCES.includes(f.ts), 'Pick where the time comes from.');
+    set('time_source', f.ts); changed.timeSource = [c.time_source, f.ts];
+  }
+  for (const [k, max, whole, msg] of [['duration', 7 * 86400, false, 'Check the length.'], ['width', 16384, true, 'Check the width.'], ['height', 16384, true, 'Check the height.']]) {
+    if (f[k] === undefined) continue;
+    const n = f[k] === null || f[k] === '' ? null : Number(f[k]);
+    need(n === null || (Number.isFinite(n) && n > 0 && n <= max && (!whole || Number.isInteger(n))), msg);
+    if (n !== c[k]) { set(k, n); changed[k] = [c[k], n]; }
+  }
+  if (typeof f.note === 'string' && str(f.note, 500) !== c.note) {
+    set('note', str(f.note, 500)); changed.note = [c.note, str(f.note, 500)]; marks.push('note');
+  }
+  if (typeof f.reason === 'string' && REASONED.includes(c.status)) {
+    const reason = str(f.reason, 300);
+    need(reason, 'Give a reason — it is shown publicly.');
+    if (reason !== c.reason) { set('reason', reason); changed.reason = [c.reason, reason]; }
+  }
+  if (marks.length) set('edited', [...new Set([...(c.edited || []), ...marks])]);
+  vals.push(c.id);
+  await q(`update clips set ${cols.map((col, i) => `${col} = $${i + 1}`).join(', ')} where id = $${vals.length}`, vals);
+  return changed;
+}
+
 async function adminClipAction(req, who) {
   const b = await readBody(req);
   const c = await q1('select * from clips where id = $1', [Number(b.id) || 0]);
@@ -713,6 +780,7 @@ async function adminClipAction(req, who) {
   const sensitive = typeof b.sensitive === 'boolean' ? b.sensitive : c.sensitive;
   const reason = str(b.reason, 300);
   const target = c.record || String(c.id);
+  let changed;
   switch (b.action) {
     case 'approve':
     case 'unhide':
@@ -720,6 +788,9 @@ async function adminClipAction(req, who) {
       break;
     case 'update':
       await q('update clips set label = $1, sensitive = $2, note = $3 where id = $4', [label, sensitive, typeof b.note === 'string' ? str(b.note, 500) : c.note, c.id]);
+      break;
+    case 'edit':
+      changed = await editClip(c, b.fields && typeof b.fields === 'object' ? b.fields : {}, label, sensitive);
       break;
     case 'hide':
       need(reason, 'Give a reason — it is shown publicly.');
@@ -734,7 +805,8 @@ async function adminClipAction(req, who) {
       break;
     default: fail(400, 'Unknown action');
   }
-  await log(who, 'clip:' + b.action, target, { label, sensitive, reason: reason || undefined });
+  await log(who, 'clip:' + b.action, target, { label, sensitive, reason: reason || undefined, changed });
+  if (b.action === 'edit') return { ok: true, clip: adminClip(await q1(`${ADMIN_CLIP_SQL} where c.id = $1`, [c.id])) };
   return { ok: true };
 }
 
@@ -860,6 +932,8 @@ const routes = [
   ['GET', /^\/api\/admin\/me$/, async (req) => ({ name: requireAdmin(req) }), 0, false],
   ['GET', /^\/api\/admin\/queue$/, async (req, url) => { requireAdmin(req); return adminQueue(url); }],
   ['GET', /^\/api\/admin\/find$/, async (req, url) => { requireAdmin(req); return adminFind(url); }],
+  ['GET', /^\/api\/admin\/events$/, async (req, url) => { requireAdmin(req); return adminEvents(url); }],
+  ['GET', /^\/api\/admin\/places$/, async (req, url) => { requireAdmin(req); return adminPlaces(url); }],
   ['POST', /^\/api\/admin\/clip$/, async (req) => adminClipAction(req, requireAdmin(req))],
   ['POST', /^\/api\/admin\/event$/, async (req) => adminEventAction(req, requireAdmin(req))],
   ['POST', /^\/api\/admin\/report$/, async (req) => adminReportAction(req, requireAdmin(req))],

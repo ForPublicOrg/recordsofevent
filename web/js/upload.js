@@ -6,7 +6,7 @@
 import { $, $$, ic, esc, dur, bytes, plural, fmtDate, api, toast, copy, qr, origin, store, config } from './util.js';
 import { inspect, patched, fingerprint } from './mp4.js';
 import { openOverlay, invalidate, peekEvent, peekHome, loadEventData } from './main.js';
-import { comboHtml, placePicker, norm } from './combo.js';
+import { comboHtml, placePicker, spotName } from './combo.js';
 
 const PART = 8 * 1024 * 1024;
 const PARALLEL = 3;
@@ -102,14 +102,7 @@ const evHead = () => (U.ev
   ? `<div class="pickrow on" id="upev" style="--accent:${U.ev.color};margin-bottom:16px;cursor:default"><span class="ic-tile" style="color:${U.ev.color}">${ic('calendar', 22)}</span><div><b>${esc(U.ev.title)}</b><span>${fmtDate(U.ev.date)} · ${esc(U.ev.city)}</span></div><button class="link" data-up="change">Change</button></div>`
   : `<div class="pickrow" id="upev" style="margin-bottom:16px;cursor:default" aria-busy="true"><span class="ic-tile">${ic('calendar', 22)}</span><div><b>Loading event…</b><span>One moment</span></div><button class="link" data-up="change">Change</button></div>`);
 const evPlaces = () => ((U.ev && U.ev.places) || []).slice(0, 10);
-// "Uhuru Park" near the event (within 30 km, or in its city); "Times Square, New York" anywhere else.
-const km = (a, b) => Math.hypot((b.lon - a.lon) * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180), b.lat - a.lat) * 111.2;
-function spotLabel(p) {
-  const ev = U && U.ev;
-  const near = !p.city || norm(p.city) === norm(p.name) || !ev
-    || (ev.lat != null && p.lat != null ? km(ev, p) < 30 : norm(p.city) === norm(ev.city));
-  return (near ? p.name : `${p.name}, ${p.city}`).slice(0, 80);
-}
+const spotLabel = (p) => spotName(p, U && U.ev);
 const placeChips = () => evPlaces().map((p) => `<button type="button" class="${U.place === p.name ? 'on' : ''}" data-placename="${esc(p.name)}">${esc(p.name)}</button>`).join('');
 function step1() {
   const total = U.files.reduce((s, f) => s + f.size, 0);
