@@ -44,6 +44,8 @@ let upMod = null;
 const loadUpload = lazy(() => import('./upload.js').then((m) => (upMod = m)));
 const loadAdmin = lazy(() => import('./admin.js'));
 const loadMp4 = lazy(() => import('./mp4.js'));
+let comboMod = null; // searchable place and country pickers, for the new-event form
+const loadCombo = lazy(() => import('./combo.js').then((m) => (comboMod = m)));
 const uploadBusy = () => !!(upMod && upMod.uploadBusy());
 
 /* ---------- data ---------- */
@@ -195,7 +197,7 @@ async function route() {
     if (parts[0] === 'new') {
       if (!wasOpen) state.overlayPushed = !!state.page;
       if (!state.page) underlay(null, my);
-      openNew();
+      openNew(my);
       return;
     }
     const key = pageKey(parts, path);
@@ -842,9 +844,18 @@ function showDownloads(ev) {
 /* ---------- new event ---------- */
 const browserTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
 const todayLocal = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-function openNew() {
-  state.nw = { title: '', date: todayLocal(), city: '', country: '', kind: 'Protest', tz: browserTz(), created: null, busy: false, dupes: [] };
+const validZone = (z) => { try { new Intl.DateTimeFormat('en', { timeZone: z }); return true; } catch { return false; } };
+// The place and country are picked from search results, never free text (see combo.js).
+const newReady = (N) => N.title.trim().length >= 6 && !!N.place && !!N.country && !!N.date;
+async function openNew(my) {
+  state.nw = { title: '', date: todayLocal(), place: null, country: null, kind: 'Protest', tz: browserTz(), created: null, busy: false, dupes: [] };
   overlay('<div class="modal sm" role="dialog" aria-label="Create an event" id="newmodal"></div>');
+  if (!comboMod) {
+    $('#newmodal').innerHTML = `<div class="mhead"><h2>Start an archive</h2><button class="iconbtn" data-action="close" aria-label="Close">${ic('x', 20)}</button></div><div class="mbody"><div class="boot" style="min-height:160px"><span class="dot"></span></div></div>`;
+    const m = await loadCombo().catch(() => null);
+    if ((my !== undefined && my !== navSeq) || !$('#newmodal')) return; // navigated away or closed while loading
+    if (!m) { closeOverlay(); toast('Couldn’t load the form. Check your connection.', 'alert'); return; }
+  }
   drawNew();
 }
 function drawNew() {
@@ -859,34 +870,45 @@ function drawNew() {
     qr($('#newqr'), url);
     return;
   }
-  const ok = N.title.trim().length >= 6 && N.city.trim().length >= 2 && N.date;
+  const { comboHtml, placePicker, countryPicker, countryByCode, zoneFor } = comboMod;
   const tzs = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return [N.tz]; } })();
   if (!tzs.includes(N.tz)) tzs.unshift(N.tz);
   m.innerHTML = `<div class="mhead"><h2>Start an archive</h2><button class="iconbtn" data-action="close" aria-label="Close">${ic('x', 20)}</button></div>
     <form class="mbody" id="newform" novalidate>
       <div class="field"><label for="ne-title">What happened?</label><input id="ne-title" maxlength="140" value="${esc(N.title)}" placeholder="e.g. Teachers’ march to city hall" autocomplete="off"></div>
       <div id="dupebox">${dupeHtml(N.dupes)}</div>
-      <div class="row2"><div class="field"><label for="ne-date">When</label><input id="ne-date" type="date" value="${N.date}" max="${todayLocal()}"></div><div class="field"><label for="ne-city">City or place</label><input id="ne-city" maxlength="80" value="${esc(N.city)}" placeholder="e.g. Nairobi" autocomplete="address-level2"></div></div>
-      <div class="row2"><div class="field"><label for="ne-country">Country</label><input id="ne-country" maxlength="80" value="${esc(N.country)}" placeholder="e.g. Kenya" autocomplete="country-name"></div><div class="field"><label for="ne-tz">Local time zone</label><select id="ne-tz">${tzs.map((z) => `<option ${z === N.tz ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select></div></div>
+      <div class="field"><label for="ne-city">City or place</label>${comboHtml('ne-city', { icon: 'pin', value: N.place ? N.place.name : '', placeholder: 'Search a city, town or square' })}</div>
+      <div class="row2"><div class="field"><label for="ne-country">Country</label>${comboHtml('ne-country', { icon: 'globe', chevron: true, value: N.country ? N.country.name : '', placeholder: 'Search countries' })}</div><div class="field"><label for="ne-date">When</label><input id="ne-date" type="date" value="${N.date}" max="${todayLocal()}"></div></div>
+      <div class="field"><label for="ne-tz">Local time zone</label><select id="ne-tz">${tzs.map((z) => `<option ${z === N.tz ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select></div>
       <div class="field"><label>Type</label><div class="cats">${(config.kinds.length ? config.kinds : ['Protest', 'March', 'Rally', 'Other']).map((k) => `<button type="button" class="${N.kind === k ? 'on' : ''}" data-kind="${esc(k)}">${esc(k)}</button>`).join('')}</div></div>
       <p class="err" id="neerr" hidden></p>
     </form>
-    <div class="mfoot"><span class="hint">${ic('lock', 14)} No account needed</span><button class="btn btn-primary" data-action="create" ${ok && !N.busy ? '' : 'disabled'} ${N.busy ? 'aria-busy="true"' : ''}>${N.busy ? 'Creating…' : 'Create event'}</button></div>`;
-  const ti = $('#ne-title'), ci = $('#ne-city'), co = $('#ne-country'), da = $('#ne-date'), tz = $('#ne-tz');
+    <div class="mfoot"><span class="hint">${ic('lock', 14)} No account needed</span><button class="btn btn-primary" data-action="create" ${newReady(N) && !N.busy ? '' : 'disabled'} ${N.busy ? 'aria-busy="true"' : ''}>${N.busy ? 'Creating…' : 'Create event'}</button></div>`;
+  const ti = $('#ne-title'), da = $('#ne-date'), tz = $('#ne-tz');
   let t = null; let lastKey = N.dupes.map((x) => x.slug).join('|');
   const upd = () => {
-    N.title = ti.value; N.city = ci.value; N.country = co.value; N.date = da.value; N.tz = tz.value;
-    const b = $('[data-action="create"]'); if (b) b.disabled = N.busy || !(N.title.trim().length >= 6 && N.city.trim().length >= 2 && N.date);
+    N.title = ti.value; N.date = da.value; N.tz = tz.value;
+    const b = $('[data-action="create"]'); if (b) b.disabled = N.busy || !newReady(N);
     clearTimeout(t);
     t = setTimeout(async () => {
-      const qtext = `${N.title} ${N.city}`.trim(); if (qtext.length < 5) return;
+      const qtext = `${N.title} ${N.place ? N.place.name : ''}`.trim(); if (qtext.length < 5) return;
       const r = await api(`/api/search?mode=dupe&q=${encodeURIComponent(qtext)}&date=${N.date}`).catch(() => null);
       if (!r || !$('#dupebox') || state.nw !== N) return;
       N.dupes = r.events; const k = N.dupes.map((x) => x.slug).join('|');
       if (k !== lastKey) { lastKey = k; $('#dupebox').innerHTML = dupeHtml(N.dupes); }
     }, 350);
   };
-  [ti, ci, co, da, tz].forEach((el) => el.addEventListener('input', upd));
+  [ti, da, tz].forEach((el) => el.addEventListener('input', upd));
+  const setTz = (z) => { if (!z || !validZone(z)) return; if (![...tz.options].some((o) => o.value === z)) tz.add(new Option(z, z), 0); tz.value = z; };
+  const country = countryPicker($('#ne-country'), { value: N.country, onPick: (c) => { N.country = c; if (c) setTz(zoneFor(null, c, tz.value)); upd(); } });
+  // Picking a city also fills in its country and time zone.
+  placePicker($('#ne-city'), { kind: 'city', value: N.place, onPick: (p) => {
+    N.place = p;
+    const c = p && countryByCode(p.cc);
+    if (c) { N.country = c; country.set(c); }
+    if (p) setTz(zoneFor(p, N.country, tz.value));
+    upd();
+  } });
   $('#newform').addEventListener('submit', (e) => { e.preventDefault(); createEvent(); });
   if (!N.busy && matchMedia('(hover: hover) and (pointer: fine)').matches) { ti.focus(); ti.setSelectionRange(ti.value.length, ti.value.length); }
 }
@@ -896,10 +918,10 @@ function dupeHtml(d) {
 }
 async function createEvent() {
   const N = state.nw; if (!N || N.busy || N.created) return;
-  if (!(N.title.trim().length >= 6 && N.city.trim().length >= 2 && N.date)) return;
+  if (!newReady(N)) return;
   N.busy = true; drawNew();
   try {
-    const r = await api('/api/events', { body: { title: N.title, date: N.date, city: N.city, country: N.country, tz: N.tz, kind: N.kind } });
+    const r = await api('/api/events', { body: { title: N.title, date: N.date, city: N.place.name, country: N.country.code, lat: N.place.lat, lon: N.place.lon, tz: N.tz, kind: N.kind } });
     N.created = r.event; invalidate();
   } catch (e) {
     N.busy = false; drawNew();
@@ -1212,6 +1234,7 @@ function intent(e) {
     if (s) prefetchEvent(s); else if (!cache.home) fetchHome().catch(() => {});
   } else if (href === '/' && (!cache.home || Date.now() - cache.homeAt > 20000)) fetchHome().catch(() => {});
   else if (href === '/verify') loadMp4().catch(() => {});
+  else if (href === '/new') loadCombo().catch(() => {});
 }
 document.addEventListener('pointerdown', intent, { passive: true });
 document.addEventListener('touchstart', intent, { passive: true }); // also enables :active on iOS

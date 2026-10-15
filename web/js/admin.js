@@ -1,5 +1,6 @@
 // Moderator area: sign-in, review queue, events, reports, hidden, recently published, log, record search.
 import { $, $$, ic, esc, api, toast, copy, dur, bytes, fmtTime, localMin, fmtDate, tzName, LABEL, ago, config, setModerator } from './util.js';
+import { comboHtml, placePicker, countryPicker, countryByCode, findCountry, zoneFor } from './combo.js';
 
 const TABS = [
   ['clips', 'Review queue', 'film'], ['events', 'Events', 'calendar'], ['reports', 'Reports', 'flag'],
@@ -36,6 +37,7 @@ const DONE = { approve: 'Approved, now public', unhide: 'Public again', hide: 'H
 
 let S = null, keyFn = null, TZS = null;
 const bound = new WeakSet();
+const pickers = new WeakMap(); // event edit form → its [city, country] pickers
 
 export async function renderAdmin(root) {
   const s = S = { root, tab: 'clips', counts: {}, items: [], who: '', seq: 0 };
@@ -286,7 +288,11 @@ function editForm(ev) {
       <div class="field"><label for="${p}kind">Kind</label><select id="${p}kind" name="kind">${kinds.map((k) => opt(k, ev.kind)).join('')}</select></div>
       <div class="field"><label for="${p}tz">Time zone</label><select id="${p}tz" name="tz">${tzs.map((z) => opt(z, ev.tz)).join('')}</select></div>
     </div>
-    <div class="row2">${inp('city', 'City', ev.city, 'maxlength="80"')}${inp('country', 'Country', ev.country, 'maxlength="80"')}</div>
+    <div class="row2">
+      <div class="field"><label for="${p}city">City or place</label>${comboHtml(`${p}city`, { name: 'city', icon: 'pin', value: ev.city, placeholder: 'Search a city or place' })}</div>
+      <div class="field"><label for="${p}country">Country</label>${comboHtml(`${p}country`, { name: 'country', icon: 'globe', chevron: true, value: findCountry(ev.country)?.name || ev.country, placeholder: 'Search countries' })}</div>
+    </div>
+    <input type="hidden" name="lat"><input type="hidden" name="lon">
     <div class="field"><label for="${p}summary">Summary</label><textarea id="${p}summary" name="summary" rows="4" maxlength="3000">${esc(ev.summary || '')}</textarea></div>
     ${inp('aliases', 'Other names <small>comma separated</small>', (ev.aliases || []).join(', '))}
     <div class="field"><label for="${p}sources">Sources <small>one per line: Title | https://…</small></label><textarea id="${p}sources" name="sources" rows="3" spellcheck="false">${esc((ev.sources || []).map((s) => (s.title ? s.title + ' | ' : '') + s.url).join('\n'))}</textarea></div>
@@ -299,10 +305,27 @@ function editForm(ev) {
   </form>`;
 }
 
+// City and country are picked from search results, like on the new-event form. A country saved
+// before the list existed shows as it is and is kept unless it's changed.
+function bindEditForm(form, ev) {
+  const p = `ae${ev.id}-`, tz = form.elements.tz;
+  const setTz = (z) => { if (!z) return; if (![...tz.options].some((o) => o.value === z)) tz.add(new Option(z, z), 0); tz.value = z; };
+  const country = countryPicker($(`#${p}country`), { value: findCountry(ev.country) || (ev.country ? { name: ev.country } : null), onPick: (c) => { if (c) setTz(zoneFor(null, c, tz.value)); } });
+  const city = placePicker($(`#${p}city`), { kind: 'city', value: ev.city ? { name: ev.city } : null, onPick: (pl) => {
+    form.elements.lat.value = pl && pl.lat != null ? pl.lat : '';
+    form.elements.lon.value = pl && pl.lon != null ? pl.lon : '';
+    const c = pl && countryByCode(pl.cc);
+    if (c) country.set(c);
+    if (pl) setTz(zoneFor(pl, country.get(), tz.value));
+  } });
+  pickers.set(form, [city, country]);
+}
+
 async function saveEvent(form) {
   const row = form.closest('.adm-evt'), err = $('.adm-err', form);
   const ev = S.items.find((x) => x.id === Number(row?.dataset.eid));
   if (!ev) return;
+  if (!(pickers.get(form) || []).map((x) => x.check()).every(Boolean)) { err.textContent = 'Pick the city and country from the lists.'; return; }
   const g = (n) => String(new FormData(form).get(n) || '').trim();
   const sources = [];
   const lines = g('sources').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -312,14 +335,14 @@ async function saveEvent(form) {
     sources.push({ title: (m[1] || '').trim(), url: m[2] });
   }
   const fields = {
-    title: g('title'), kind: g('kind'), city: g('city'), country: g('country'), tz: g('tz'), summary: g('summary'),
+    title: g('title'), kind: g('kind'), city: g('city'), country: g('country'), lat: g('lat'), lon: g('lon'), tz: g('tz'), summary: g('summary'),
     aliases: g('aliases').split(',').map((a) => a.trim()).filter(Boolean), sources,
     figures: { label: g('fl'), low: g('flo'), high: g('fhi'), note: g('fnote') },
   };
   err.textContent = '';
   const btn = $('button[type=submit]', form); btn.disabled = true;
   try { await api('/api/admin/event', { body: { id: ev.id, action: 'update', fields } }); } catch (e) { btn.disabled = false; return e.status === 401 ? fail(e) : (err.textContent = e.message); }
-  Object.assign(ev, fields, { figures: fields.figures.label ? fields.figures : null, title: fields.title || ev.title, city: fields.city || ev.city });
+  Object.assign(ev, fields, { figures: fields.figures.label ? fields.figures : null, title: fields.title || ev.title, city: fields.city || ev.city, lat: fields.lat ? +fields.lat : ev.lat, lon: fields.lon ? +fields.lon : ev.lon });
   row.outerHTML = eventRow(ev);
   toast('Event saved');
 }
@@ -425,7 +448,7 @@ function onClick(e) {
       const row = t.closest('.adm-evt'), slot = $('[data-editslot]', row);
       if (slot.children.length) { slot.innerHTML = ''; break; }
       const ev = S.items.find((x) => x.id === Number(row.dataset.eid));
-      if (ev) { slot.innerHTML = editForm(ev); $('input', slot)?.focus(); }
+      if (ev) { slot.innerHTML = editForm(ev); bindEditForm($('form', slot), ev); $('input', slot)?.focus(); }
       break;
     }
     case 'ev-cancel': t.closest('[data-editslot]').innerHTML = ''; break;

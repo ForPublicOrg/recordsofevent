@@ -5,6 +5,8 @@ import { ready, q, q1, next } from './db.js';
 import * as store from './storage.js';
 import { TEMPLATE } from './template.js';
 import { IMPORT_PART, probeLink, packPatches, unpackPatches, fetchPart, scrub, hasher, saveHash, posterFor } from './links.js';
+import { placesOn, searchPlaces } from './places.js';
+import { findCountry } from '../web/js/countries.js';
 
 const env = process.env;
 const cfg = {
@@ -16,6 +18,7 @@ const cfg = {
   operator: env.OPERATOR_NAME || '',
   repo: env.REPO_URL || '',
   links: env.LINK_IMPORTS !== 'off',
+  places: placesOn,
 };
 const SECRET = env.APP_SECRET || crypto.createHash('sha256').update('roe:' + (env.DATABASE_URL || env.POSTGRES_URL || 'dev') + (env.ADMIN_PASSWORD || '')).digest('hex');
 const KINDS = ['Protest', 'March', 'Rally', 'Strike', 'Vigil', 'Election', 'Disaster', 'Accident', 'Public meeting', 'Other'];
@@ -36,6 +39,8 @@ const shaHex = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const isHex64 = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s);
+// A latitude (max 90) or longitude (max 180) from JSON or a query string; anything else is null.
+const coord = (v, max) => { const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN; return Number.isFinite(n) && Math.abs(n) <= max ? n : null; };
 const validTz = (tz) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
 const todayIn = (tz) => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date()); } catch { return new Date().toISOString().slice(0, 10); } };
 const yymmdd = (date) => date.slice(2, 4) + date.slice(5, 7) + date.slice(8, 10);
@@ -114,7 +119,7 @@ const log = (actor, action, target, detail = null) => q('insert into modlog (act
 
 /* ---------- serializers ---------- */
 // One pass over each event's clips (index clips_event) instead of a subquery per figure.
-const EVENT_SQL = `select e.id, e.slug, e.code, e.title, e.kind, e.date, e.tz, e.city, e.country, e.aliases, e.summary,
+const EVENT_SQL = `select e.id, e.slug, e.code, e.title, e.kind, e.date, e.tz, e.city, e.country, e.lat, e.lon, e.aliases, e.summary,
   e.figures, e.sources, e.color, e.status, e.created_at, e.updated_at,
   s.n, s.pending, s.checked, coalesce(s.secs, 0)::float8 as secs, s.last_upload, pl.nplaces
   from events e
@@ -134,7 +139,7 @@ const isLive = (e) => e.status !== 'hidden' && ((e.last_upload && Date.now() - n
 function pubEvent(e, extra = {}) {
   return {
     slug: e.slug, code: e.code, title: e.title, kind: e.kind, date: e.date, tz: e.tz, city: e.city, country: e.country,
-    aliases: e.aliases || [], summary: e.summary, figures: e.figures || null, sources: e.sources || [], color: e.color,
+    lat: e.lat ?? null, lon: e.lon ?? null, aliases: e.aliases || [], summary: e.summary, figures: e.figures || null, sources: e.sources || [], color: e.color,
     status: e.status, created: e.created_at, live: isLive(e),
     n: e.n ?? 0, pending: e.pending ?? 0, checked: e.checked ?? 0, secs: e.secs ?? 0, nplaces: e.nplaces ?? 0, ...extra,
   };
@@ -187,8 +192,21 @@ async function eventBySlug(slug) { return q1(`${EVENT_SQL} where e.slug = $1`, [
 async function apiConfig() {
   return {
     name: cfg.name, moderation: cfg.moderation, maxFileBytes: cfg.maxFileBytes, storage: store.configured(),
-    links: cfg.links && store.configured(), contact: cfg.contact, operator: cfg.operator, repo: cfg.repo, kinds: KINDS,
+    links: cfg.links && store.configured(), places: cfg.places, contact: cfg.contact, operator: cfg.operator, repo: cfg.repo, kinds: KINDS,
   };
+}
+
+// Search-as-you-type for the place pickers (see places.js). Answers are cached by the CDN for a day.
+async function apiPlaces(req, url) {
+  need(cfg.places, 'Place search is switched off on this site.', 503);
+  const q = str(url.searchParams.get('q'), 100);
+  if (q.length < 2) return { places: [] };
+  const kind = url.searchParams.get('k') === 'city' ? 'city' : 'spot';
+  const lat = coord(url.searchParams.get('lat'), 90), lon = coord(url.searchParams.get('lon'), 180);
+  await limit(req, 'places', 600);
+  const places = await searchPlaces(q, kind, kind === 'spot' && lat !== null && lon !== null ? { lat: +lat.toFixed(2), lon: +lon.toFixed(2) } : null);
+  need(places, 'Place search isn’t available right now.', 503);
+  return { places };
 }
 
 // Two round-trip levels: events + just-in together, then everything that needs the event ids.
@@ -281,11 +299,14 @@ async function apiSearch(url) {
 
 async function apiCreateEvent(req) {
   const b = await readBody(req);
-  const title = str(b.title, 140), city = str(b.city, 80), country = str(b.country, 80), date = str(b.date, 10);
+  const title = str(b.title, 140), city = str(b.city, 80), date = str(b.date, 10);
+  const country = findCountry(str(b.country, 80)); // a code or a name from the list, nothing else
   const tz = validTz(b.tz) ? b.tz : 'UTC';
   const kind = KINDS.includes(b.kind) ? b.kind : 'Other';
+  const lat = coord(b.lat, 90), lon = coord(b.lon, 180), at = lat !== null && lon !== null;
   need(title.length >= 6, 'Give the event a name (at least 6 characters).');
   need(city.length >= 2, 'Add the city or place.');
+  need(country, 'Pick the country from the list.');
   need(/^\d{4}-\d{2}-\d{2}$/.test(date) && !isNaN(Date.parse(date)), 'Pick a date.');
   need(date >= '1900-01-01' && date <= todayIn('Pacific/Kiritimati'), 'The date can’t be in the future.');
   await limit(req, 'event', 6);
@@ -298,8 +319,9 @@ async function apiCreateEvent(req) {
   do { code = randomCode(4); } while (await q1('select 1 from events where code = $1', [code]));
   const count = (await q1('select count(*)::int as n from events')).n;
   const status = cfg.moderation === 'pre' ? 'pending' : 'published';
-  const e = await q1(`insert into events (slug, code, title, kind, date, tz, city, country, color, status, ip)
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning *`, [slug, code, title, kind, date, tz, city, country, PALETTE[count % PALETTE.length], status, ipHash(req)]);
+  const e = await q1(`insert into events (slug, code, title, kind, date, tz, city, country, lat, lon, color, status, ip)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning *`,
+  [slug, code, title, kind, date, tz, city, country.name, at ? lat : null, at ? lon : null, PALETTE[count % PALETTE.length], status, ipHash(req)]);
   await q('insert into places (event_id, name) values ($1, $2) on conflict do nothing', [e.id, city]);
   return { event: pubEvent(e) };
 }
@@ -727,10 +749,17 @@ async function adminEventAction(req, who) {
     const sources = (Array.isArray(f.sources) ? f.sources : []).slice(0, 12)
       .map((s) => ({ title: str(s.title, 80), url: str(s.url, 400) })).filter((s) => /^https?:\/\//.test(s.url));
     const fig = f.figures && str(f.figures.label, 80) ? { label: str(f.figures.label, 80), low: str(f.figures.low, 40), high: str(f.figures.high, 40), note: str(f.figures.note, 200) } : null;
-    await q(`update events set title = $1, kind = $2, summary = $3, aliases = $4, sources = $5::text::jsonb, figures = $6::text::jsonb, city = $7, country = $8, tz = $9, updated_at = now() where id = $10`, [
+    // A country from the list; one saved before the list existed (or none) stays until it's changed.
+    const cIn = str(f.country, 80);
+    const country = cIn === e.country ? cIn : findCountry(cIn)?.name;
+    need(country !== undefined, 'Pick the country from the list.');
+    const city = str(f.city, 80) || e.city;
+    const lat = coord(f.lat, 90), lon = coord(f.lon, 180);
+    const [la, lo] = lat !== null && lon !== null ? [lat, lon] : city === e.city ? [e.lat, e.lon] : [null, null];
+    await q(`update events set title = $1, kind = $2, summary = $3, aliases = $4, sources = $5::text::jsonb, figures = $6::text::jsonb, city = $7, country = $8, tz = $9, lat = $10, lon = $11, updated_at = now() where id = $12`, [
       str(f.title, 140) || e.title, KINDS.includes(f.kind) ? f.kind : e.kind, str(f.summary, 3000),
       (Array.isArray(f.aliases) ? f.aliases : []).map((a) => str(a, 60)).filter(Boolean).slice(0, 12),
-      JSON.stringify(sources), fig ? JSON.stringify(fig) : null, str(f.city, 80) || e.city, str(f.country, 80), validTz(f.tz) ? f.tz : e.tz, e.id]);
+      JSON.stringify(sources), fig ? JSON.stringify(fig) : null, city, country, validTz(f.tz) ? f.tz : e.tz, la, lo, e.id]);
   } else fail(400, 'Unknown action');
   await log(who, 'event:' + b.action, e.slug);
   return { ok: true };
@@ -808,6 +837,7 @@ const routes = [
   ['GET', /^\/api\/config$/, async () => apiConfig(), 300, false],
   ['GET', /^\/api\/home$/, async () => apiHome(), 20],
   ['GET', /^\/api\/search$/, async (req, url) => apiSearch(url), 20],
+  ['GET', /^\/api\/places$/, async (req, url) => apiPlaces(req, url), 86400],
   ['POST', /^\/api\/events$/, async (req) => apiCreateEvent(req)],
   ['GET', /^\/api\/events\/([a-z0-9-]+)\/manifest\.json$/, async (req, url, m, res) => exportEvent(req, res, m[1], 'manifest')],
   ['GET', /^\/api\/events\/([a-z0-9-]+)\/sha256sums\.txt$/, async (req, url, m, res) => exportEvent(req, res, m[1], 'sums')],

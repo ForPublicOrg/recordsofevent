@@ -6,6 +6,7 @@
 import { $, $$, ic, esc, dur, bytes, plural, fmtDate, api, toast, copy, qr, origin, store, config } from './util.js';
 import { inspect, patched, fingerprint } from './mp4.js';
 import { openOverlay, invalidate, peekEvent, peekHome, loadEventData } from './main.js';
+import { comboHtml, placePicker, norm } from './combo.js';
 
 const PART = 8 * 1024 * 1024;
 const PARALLEL = 3;
@@ -101,6 +102,14 @@ const evHead = () => (U.ev
   ? `<div class="pickrow on" id="upev" style="--accent:${U.ev.color};margin-bottom:16px;cursor:default"><span class="ic-tile" style="color:${U.ev.color}">${ic('calendar', 22)}</span><div><b>${esc(U.ev.title)}</b><span>${fmtDate(U.ev.date)} · ${esc(U.ev.city)}</span></div><button class="link" data-up="change">Change</button></div>`
   : `<div class="pickrow" id="upev" style="margin-bottom:16px;cursor:default" aria-busy="true"><span class="ic-tile">${ic('calendar', 22)}</span><div><b>Loading event…</b><span>One moment</span></div><button class="link" data-up="change">Change</button></div>`);
 const evPlaces = () => ((U.ev && U.ev.places) || []).slice(0, 10);
+// "Uhuru Park" near the event (within 30 km, or in its city); "Times Square, New York" anywhere else.
+const km = (a, b) => Math.hypot((b.lon - a.lon) * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180), b.lat - a.lat) * 111.2;
+function spotLabel(p) {
+  const ev = U && U.ev;
+  const near = !p.city || norm(p.city) === norm(p.name) || !ev
+    || (ev.lat != null && p.lat != null ? km(ev, p) < 30 : norm(p.city) === norm(ev.city));
+  return (near ? p.name : `${p.name}, ${p.city}`).slice(0, 80);
+}
 const placeChips = () => evPlaces().map((p) => `<button type="button" class="${U.place === p.name ? 'on' : ''}" data-placename="${esc(p.name)}">${esc(p.name)}</button>`).join('');
 function step1() {
   const total = U.files.reduce((s, f) => s + f.size, 0);
@@ -110,9 +119,9 @@ function step1() {
     ${config.links === false ? '' : `<form class="linkadd" id="linkadd" novalidate><span class="lk">${ic('link', 18)}</span><input id="linkin" type="url" inputmode="url" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Or paste a video link" aria-label="Video link"><button class="btn btn-ghost btn-sm" type="submit">Add</button></form>
     <p class="linkhint" id="linkhint">The link must be public (in Drive: “Anyone with the link”). We copy the video when you tap Upload. The link isn’t kept.</p>`}
     <div class="files" id="filelist">${U.files.map(fileRow).join('')}</div>
-    ${U.files.length ? `<div class="field" style="margin-top:18px"><label>Where were you filming? <span style="color:var(--dim)">(optional)</span></label>
+    ${U.files.length ? `<div class="field" style="margin-top:18px"><label for="placeother">Where were you filming? <span style="color:var(--dim)">(optional)</span></label>
       <div class="cats" id="placechips">${placeChips()}</div>
-      <input id="placeother" maxlength="80" placeholder="Another place — street, square, landmark" value="${esc(places.some((p) => p.name === U.place) ? '' : U.place)}" style="margin-top:8px"></div>` : ''}`,
+      <div${places.length ? ' style="margin-top:8px"' : ''}>${comboHtml('placeother', { icon: 'pin', value: places.some((p) => p.name === U.place) ? '' : U.place, placeholder: places.length ? 'Somewhere else? Search a street or landmark' : 'Search a street, square or landmark' })}</div></div>` : ''}`,
   `<span class="hint">${U.files.length ? `${plural(U.files.length, 'video')} · ${bytes(total)}` : ''}</span><div style="display:flex;gap:8px"><button class="btn btn-ghost" data-up="back">Back</button><button class="btn btn-primary" data-up="next" ${U.ev && U.files.length && !U.files.some((f) => f.preparing) ? '' : 'disabled'}>Continue ${ic('arrow', 16)}</button></div>`];
 }
 const thumbHtml = (f) => (f.thumb ? `<img src="${f.thumb}" alt="">` : ic(f.link ? 'link' : 'film', 26));
@@ -245,8 +254,13 @@ function bindFiles() {
     form.addEventListener('submit', (e) => { e.preventDefault(); if (addLinks(lin.value)) lin.value = ''; });
     lin.addEventListener('paste', () => setTimeout(() => { if (/^\s*https?:\/\/\S+/i.test(lin.value) && addLinks(lin.value)) lin.value = ''; }, 0));
   }
+  // Somewhere not in the chips: searched near the event, picked from the results (combo.js).
   const other = $('#placeother');
-  if (other) other.addEventListener('input', () => { U.place = other.value.trim(); $$('#placechips button').forEach((b) => b.classList.toggle('on', b.dataset.placename === U.place)); });
+  U.picker = other && placePicker(other, {
+    kind: 'spot', near: () => U.ev, local: () => (U.ev && U.ev.places) || [], label: spotLabel,
+    value: U.place && !evPlaces().some((p) => p.name === U.place) ? { name: U.place } : null,
+    onPick: (p) => { U.place = p ? spotLabel(p) : ''; $$('#placechips button').forEach((b) => b.classList.toggle('on', b.dataset.placename === U.place)); },
+  });
 }
 function addFiles(list) {
   const had = U.files.length, added = [];
@@ -538,12 +552,15 @@ document.addEventListener('click', (e) => {
   if (!t || !t.closest('#upmodal')) return;
   if (t.dataset.pick) { const ev = (U.events || []).find((x) => x.slug === t.dataset.pick); if (ev) pickEvent(ev); return; }
   if (t.dataset.rm) { removeFile(byId(t.dataset.rm)); return; }
-  if (t.dataset.placename) { U.place = U.place === t.dataset.placename ? '' : t.dataset.placename; $$('#placechips button').forEach((b) => b.classList.toggle('on', b.dataset.placename === U.place)); const o = $('#placeother'); if (o) o.value = ''; return; }
+  if (t.dataset.placename) { U.place = U.place === t.dataset.placename ? '' : t.dataset.placename; $$('#placechips button').forEach((b) => b.classList.toggle('on', b.dataset.placename === U.place)); if (U.picker) U.picker.set(null); return; }
   if (t.dataset.edittime) { const f = byId(t.dataset.edittime); if (f) editTime(t, f); return; }
   if (t.dataset.retry) { const f = byId(t.dataset.retry); if (f && !U.running) { f.phase = 'ready'; f.pct = 0; run(); } return; }
   if (t.disabled) return;
   switch (t.dataset.up) {
-    case 'next': if (U.step === 0 ? U.ev : U.step === 1 ? U.ev && U.files.length && !U.files.some((f) => f.preparing) : true) { U.step++; draw(); } break;
+    case 'next':
+      if (U.step === 1 && U.picker && !U.picker.check()) { $('#placeother').focus(); break; } // a place typed but not picked
+      if (U.step === 0 ? U.ev : U.step === 1 ? U.ev && U.files.length && !U.files.some((f) => f.preparing) : true) { U.step++; draw(); }
+      break;
     case 'back': U.step--; draw(); break;
     case 'change': U.step = 0; if (!U.events) seedEvents(); draw(); break;
     case 'sensitive': U.sensitive = !U.sensitive; draw(); break;

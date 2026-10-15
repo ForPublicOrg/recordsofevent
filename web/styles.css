@@ -494,6 +494,7 @@ div.done { text-align: center; display: grid; justify-items: center; gap: 10px; 
 .newacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .newacts .btn { min-width: 0; padding: 0 12px; }
 .cats { display: flex; gap: 8px; flex-wrap: wrap; }
+.cats:empty { display: none; }
 .cats button { height: 40px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-2); font-weight: 600; transition: background-color .12s, border-color .12s, color .12s, transform .12s; }
 .cats button.on { background: var(--btn); color: var(--btn-ink); border-color: var(--btn); }
 .dupe { padding: 14px; border-radius: 18px; background: rgba(251, 191, 36, .1); border: 1px solid rgba(251, 191, 36, .35); margin-bottom: 14px; animation: slidein .3s; }
@@ -590,6 +591,34 @@ mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: in
 .toggle.locked .sw { opacity: .75; }
 .field textarea { border-radius: 14px; border: 1.5px solid var(--line-2); background: var(--surface); padding: 12px 16px; font-size: 16px; resize: vertical; }
 .field textarea:focus { outline: none; border-color: var(--accent); }
+/* Searchable pickers (combo.js): the list opens in the flow under the box, so modals never clip it. */
+.combo { position: relative; min-width: 0; }
+.field .combo input { padding: 0 42px 0 44px; text-overflow: ellipsis; }
+.combo .lead, .combo .chev { position: absolute; top: 0; height: 52px; display: grid; place-items: center; color: var(--dim); pointer-events: none; transition: color .12s, transform .15s; }
+.combo .lead { left: 15px; }
+.combo .chev { right: 14px; }
+.combo:focus-within .lead { color: var(--accent); }
+.combo input[aria-expanded="true"] ~ .chev { transform: rotate(180deg); }
+.combo.busy .lead { animation: rec 1s ease-in-out infinite; }
+.combo.bad input { border-color: rgba(255, 59, 48, .75); }
+.combo-list { position: relative; list-style: none; margin: 6px 0 0; padding: 6px; max-height: min(300px, 46vh); overflow-y: auto; overscroll-behavior: contain; border-radius: 16px; background: var(--surface); border: 1.5px solid var(--line-2); box-shadow: 0 18px 40px -22px rgba(0, 0, 0, .55); }
+.combo-list [role="option"] { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; border-radius: 11px; cursor: pointer; }
+.combo-list [role="option"].on { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.combo-list .oi { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
+.combo-list .on .oi { color: var(--accent); }
+.combo-list .oi.cc { font: 700 11.5px var(--font-mono); letter-spacing: .02em; }
+.combo-list b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-list small { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-list .grp { padding: 10px 10px 4px; font: 600 11.5px var(--font-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+.combo-list .msg { display: flex; gap: 8px; align-items: center; padding: 10px; color: var(--muted); font-size: 13.5px; }
+.combo-list .msg svg { flex: none; color: var(--warn-ink); }
+.combo-list .dots { width: 14px; height: 14px; flex: none; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--accent); animation: combo-spin .8s linear infinite; }
+@keyframes combo-spin { to { transform: rotate(360deg); } }
+.combo-note { display: flex; gap: 6px; align-items: center; margin: 7px 2px 0; color: var(--muted); font-size: 13px; line-height: 1.35; }
+.combo-note:empty { display: none; }
+.combo-note svg { flex: none; }
+.combo-note.bad { color: #ff8f87; font-weight: 600; }
+:root[data-theme="light"] .combo-note.bad { color: #c4271c; }
 .st { display: inline-flex; gap: 4px; align-items: center; font-weight: 700; }
 .st-published { color: var(--ok-ink); } .st-pending { color: var(--warn-ink); } .st-rejected, .st-removed, .st-withdrawn, .st-hidden { color: var(--dim); }
 .btn.confirm { background: var(--rec); color: #fff; border-color: var(--rec); }
@@ -644,6 +673,7 @@ mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: in
   .pickrow:hover { border-color: var(--line-2); }
   .sres:hover { background: var(--surface-2); }
   .ptile:hover img { opacity: .75; }
+  .combo-list [role="option"]:not(.on):hover { background: var(--surface-2); }
 }
 /* Ken Burns: wide hover screens only, while the hero is on screen (.kb), paused under overlays. */
 @media (hover: hover) and (pointer: fine) and (min-width: 1001px) {
