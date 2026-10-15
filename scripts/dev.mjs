@@ -72,6 +72,7 @@ http.createServer(async (req, res) => {
   try {
     if (p.startsWith('/__storage/')) return await localStorage(req, res, url);
     if (p === '/app.js') return sendJs(res, (await bundle()).get('/main.js'));
+    if (p === '/_vercel/insights/script.js') return sendJs(res, ''); // Web Analytics only exists on Vercel
     if (p.startsWith('/assets/') && p.endsWith('.js')) {
       const text = chunks.get(p) ?? (await bundle()).get(p);
       if (text !== undefined) return sendJs(res, text);
